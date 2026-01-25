@@ -25,7 +25,7 @@ command: |
 
 # Optional: SSH host key verification
 # known_hosts_path: ~/.ssh/known_hosts
-# strict_host_key_checking: true
+strict_host_key_checking: false
 hosts:
   - 1.2.3.4
   - example.com

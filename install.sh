@@ -1,90 +1,116 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# Copyright (c) 2026 kk
+#
+# This software is released under the MIT License.
+# https://opensource.org/licenses/MIT
 
-# =================================================================
-# 项目名称: kkfly 官方安装脚本
-# 描述: 自动获取最新版、下载、安全覆盖安装至 /usr/local/bin
-# =================================================================
+set -o errexit
+set -o nounset
+set -o pipefail
 
-set -e  # 出错立即停止
+# curl exec:
+# curl -fsSL https://raw.githubusercontent.com/kevin197011/kkfly/main/install.sh | bash
 
-# --- 配置区 ---
-REPO="kevin197011/kkfly"
-BINARY_NAME="kkfly"
-INSTALL_PATH="/usr/local/bin/$BINARY_NAME"
-TMP_DIR="/tmp/${BINARY_NAME}_install_$(date +%s)"
+# --- vars ---
+readonly REPO="kevin197011/kkfly"
+readonly BINARY_NAME="kkfly"
+readonly INSTALL_DIR="/usr/local/bin"
+readonly INSTALL_PATH="${INSTALL_DIR}/${BINARY_NAME}"
 
-# --- 1. 环境检查 ---
-echo "🔍 正在检查环境..."
-
-if [ "$EUID" -ne 0 ]; then 
-    echo "❌ 错误: 请使用 sudo 运行此脚本。"
-    exit 1
-fi
-
-for cmd in curl tar grep sed; do
-    if ! command -v $cmd &> /dev/null; then
-        echo "❌ 错误: 系统缺少必要工具: $cmd"
+# --- run code ---
+# 自动识别平台并调用对应函数
+kkfly::install::run() {
+    local platform='debian'
+    command -v yum >/dev/null && platform='centos'
+    command -v dnf >/dev/null && platform='centos'
+    command -v brew >/dev/null && platform='mac'
+    
+    # 权限检查：除了 Mac Brew 环境外通常需要 root
+    if [[ "${platform}" != "mac" && "$EUID" -ne 0 ]]; then
+        echo "❌ Error: Please run as root (use sudo)"
         exit 1
     fi
-done
 
-# --- 2. 自动获取最新版本号 ---
-echo "🌐 正在检索最新版本..."
-LATEST_TAG=$(curl -s "https://api.github.com/repos/$REPO/releases/latest" | grep '"tag_name":' | sed -E 's/.*"v?([^"]+)".*/\1/')
+    eval "kkfly::install::${platform}" "$@"
+}
 
-if [ -z "$LATEST_TAG" ]; then
-    echo "⚠️  无法获取最新版本，尝试回退到默认版本 0.1.5"
-    VERSION="0.1.5"
-else
-    VERSION=$LATEST_TAG
-    echo "✨ 发现最新版本: v$VERSION"
-fi
+# --- centos code ---
+kkfly::install::centos() {
+    kkfly::install::common
+}
 
-# --- 3. 构建下载地址 ---
-# 匹配格式: kkfly_0.1.5_linux_amd64.tar.gz
-FILENAME="${BINARY_NAME}_${VERSION}_linux_amd64.tar.gz"
-URL="https://github.com/$REPO/releases/download/v${VERSION}/${FILENAME}"
+# --- debian code ---
+kkfly::install::debian() {
+    kkfly::install::common
+}
 
-# --- 4. 执行下载 ---
-mkdir -p "$TMP_DIR"
-cd "$TMP_DIR"
+# --- mac code ---
+kkfly::install::mac() {
+    # 如果是 Mac，可能需要安装到不同的路径或处理不同的架构名
+    kkfly::install::common
+}
 
-echo "📥 正在下载 $FILENAME..."
-if ! curl -fsSL "$URL" -o "$FILENAME"; then
-    echo "❌ 错误: 下载失败。请检查网络或确认 Release 中存在该文件。"
-    echo "URL: $URL"
-    exit 1
-fi
+# --- common code ---
+kkfly::install::common() {
+    local tmp_dir
+    tmp_dir=$(mktemp -d -t kkfly_XXXXXX)
+    trap 'rm -rf "${tmp_dir}"' EXIT # 确保退出时清理
+    
+    cd "${tmp_dir}"
 
-# --- 5. 解压与校验 ---
-echo "📦 正在解压..."
-tar -zxf "$FILENAME"
+    echo "🔍 Checking latest version..."
+    local version
+    version=$(curl -s "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name":' | sed -E 's/.*"v?([^"]+)".*/\1/')
+    
+    if [[ -z "${version}" ]]; then
+        version="0.1.5" # fallback
+        echo "⚠️  Fallback to version ${version}"
+    else
+        echo "✨ Found latest version: v${version}"
+    fi
 
-# 自动寻找二进制文件（防止压缩包内包含子目录）
-TARGET_FILE=$(find . -type f -name "$BINARY_NAME" -perm -u+x | head -n 1)
+    # 识别系统架构
+    local arch
+    arch=$(uname -m)
+    case "${arch}" in
+        x86_64)  arch="amd64" ;;
+        aarch64|arm64) arch="arm64" ;;
+        *) echo "❌ Unsupported architecture: ${arch}"; exit 1 ;;
+    esac
 
-if [ -z "$TARGET_FILE" ]; then
-    echo "❌ 错误: 在压缩包内未找到可执行文件 $BINARY_NAME"
-    exit 1
-fi
+    local filename="${BINARY_NAME}_${version}_linux_${arch}.tar.gz"
+    # 如果是 Mac，调整文件名后缀
+    [[ "$(uname)" == "Darwin" ]] && filename="${BINARY_NAME}_${version}_darwin_${arch}.tar.gz"
 
-# --- 6. 安全覆盖安装 ---
-echo "🔧 正在执行覆盖安装..."
+    local url="https://github.com/${REPO}/releases/download/v${version}/${filename}"
 
-# 如果程序正在运行，install 命令比 mv 更安全
-# 它会断开旧索引并创建新索引，避免 "Text file busy" 错误
-install -m 755 "$TARGET_FILE" "$INSTALL_PATH"
+    echo "📥 Downloading from GitHub..."
+    curl -fsSL "${url}" -o "${filename}"
 
-# --- 7. 清理与完成 ---
-rm -rf "$TMP_DIR"
+    echo "📦 Extracting..."
+    tar -zxf "${filename}"
 
-echo "--------------------------------------------------"
-if command -v $BINARY_NAME &> /dev/null; then
-    echo "✅ kkfly 安装/更新成功！"
-    echo "📍 位置: $INSTALL_PATH"
-    echo "🚀 版本: $($BINARY_NAME --version 2>/dev/null || echo "$VERSION")"
+    # 寻找二进制文件
+    local target
+    target=$(find . -type f -name "${BINARY_NAME}" -perm -u+x | head -n 1)
+
+    if [[ -z "${target}" ]]; then
+        echo "❌ Error: Binary ${BINARY_NAME} not found in package"
+        exit 1
+    fi
+
+    echo "🔧 Installing to ${INSTALL_PATH}..."
+    install -m 755 "${target}" "${INSTALL_PATH}"
+
     echo "--------------------------------------------------"
-    echo "输入 '$BINARY_NAME --help' 开始使用"
-else
-    echo "❌ 安装失败，请检查 /usr/local/bin 写入权限。"
-fi
+    if command -v "${BINARY_NAME}" >/dev/null; then
+        echo "✅ ${BINARY_NAME} installed successfully!"
+        echo "🚀 Version: $(${BINARY_NAME} --version 2>/dev/null || echo "${version}")"
+    else
+        echo "❌ Installation failed."
+        exit 1
+    fi
+}
+
+# --- run main ---
+kkfly::install::run "$@"

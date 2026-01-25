@@ -43,3 +43,15 @@ The system SHALL emit lifecycle events and produce a final report for each host 
 - **WHEN** a run completes across all hosts
 - **THEN** the system prints a summary including counts of success/failure and per-host durations and exit codes
 
+#### Scenario: Audit-friendly event formatting
+- **WHEN** the system prints lifecycle events to the terminal
+- **THEN** each event SHALL be formatted as fixed columns in a single line using the shape: `YYYY-MM-DD HH:MM:SS  HOST  STAGE  MESSAGE?`
+- **AND** `STAGE` SHALL be one of: `QUEUED`, `CONNECT`, `RUN`, `DONE`, `OUT`, `ERR`
+- **AND** the output SHALL be readable when copied into tickets or chat (no mandatory ANSI colors)
+
+#### Scenario: Summary table formatting
+- **WHEN** the run reaches the final summary
+- **THEN** the summary SHALL include an aggregate line with total hosts, succeeded count, failed count, and total duration
+- **AND** the summary SHALL include a tabular list with a header row and columns for at least: host, status, exit code, duration, and error
+- **AND** the per-host rows SHALL be sorted by host for stable review
+

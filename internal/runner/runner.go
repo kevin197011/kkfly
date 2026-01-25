@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"text/tabwriter"
 	"time"
@@ -62,6 +63,28 @@ func Run(ctx context.Context, cfg config.Config, opt Options) (Report, error) {
 	out := opt.Output
 	if out == nil {
 		out = os.Stdout
+	}
+
+	// Header (audit-friendly, easy to copy/paste)
+	{
+		strict := true
+		if cfg.StrictHostKeyChecking != nil {
+			strict = *cfg.StrictHostKeyChecking
+		}
+		fmt.Fprintf(
+			out,
+			"KKFLY RUN  %s  hosts=%d  conc=%d  sudo=%t  strict_host_key=%t\n",
+			started.Format("2006-01-02 15:04:05"),
+			len(cfg.Hosts),
+			cfg.Concurrency,
+			cfg.Sudo,
+			strict,
+		)
+		cmdLine := strings.Join(strings.Fields(cfg.Command), " ")
+		if cmdLine != "" {
+			fmt.Fprintf(out, "CMD: %s\n", cmdLine)
+		}
+		fmt.Fprintln(out, "")
 	}
 
 	events := make(chan Event, 4096)
@@ -133,6 +156,7 @@ func Run(ctx context.Context, cfg config.Config, opt Options) (Report, error) {
 }
 
 func runOne(ctx context.Context, cfg config.Config, host string, events chan<- Event) HostResult {
+	hostStarted := time.Now()
 	events <- Event{At: time.Now(), Host: host, Kind: "connecting"}
 
 	strict := true
@@ -154,11 +178,16 @@ func runOne(ctx context.Context, cfg config.Config, host string, events chan<- E
 		ConnectTimeout:        time.Duration(cfg.ConnectTimeoutSeconds) * time.Second,
 	})
 	if err != nil {
-		events <- Event{At: time.Now(), Host: host, Kind: "finished", Message: fmt.Sprintf("connect error: %v", err)}
+		finished := time.Now()
+		dur := finished.Sub(hostStarted).Truncate(time.Millisecond)
+		events <- Event{At: finished, Host: host, Kind: "finished", Message: fmt.Sprintf("fail exit=-1 dur=%s err=%v", dur, err)}
 		return HostResult{
 			Host:     host,
 			Status:   StatusFailed,
 			ExitCode: -1,
+			Started:  hostStarted,
+			Finished: finished,
+			Duration: dur.String(),
 			Error:    err.Error(),
 		}
 	}
@@ -209,23 +238,33 @@ func runOne(ctx context.Context, cfg config.Config, host string, events chan<- E
 	if execErr != nil {
 		hr.Status = StatusFailed
 		hr.Error = execErr.Error()
-		events <- Event{At: time.Now(), Host: host, Kind: "finished", Message: fmt.Sprintf("error: %v", execErr)}
+		dur := hr.Finished.Sub(hr.Started).Truncate(time.Millisecond)
+		events <- Event{At: time.Now(), Host: host, Kind: "finished", Message: fmt.Sprintf("fail exit=%d dur=%s err=%v", hr.ExitCode, dur, execErr)}
 		return hr
 	}
 
 	if res.ExitCode == 0 {
 		hr.Status = StatusSucceeded
-		events <- Event{At: time.Now(), Host: host, Kind: "finished", Message: "exit=0"}
+		dur := hr.Finished.Sub(hr.Started).Truncate(time.Millisecond)
+		events <- Event{At: time.Now(), Host: host, Kind: "finished", Message: fmt.Sprintf("ok exit=0 dur=%s", dur)}
 		return hr
 	}
 
 	hr.Status = StatusFailed
-	events <- Event{At: time.Now(), Host: host, Kind: "finished", Message: fmt.Sprintf("exit=%d", res.ExitCode)}
+	{
+		dur := hr.Finished.Sub(hr.Started).Truncate(time.Millisecond)
+		msg := fmt.Sprintf("fail exit=%d dur=%s", res.ExitCode, dur)
+		if hr.Error != "" {
+			msg += " err=" + hr.Error
+		}
+		events <- Event{At: time.Now(), Host: host, Kind: "finished", Message: msg}
+	}
 	return hr
 }
 
 func printEvents(out io.Writer, events <-chan Event, suppressOutputLines bool) {
 	const tsFmt = "2006-01-02 15:04:05"
+	fmt.Fprintf(out, "%-19s  %-16s  %-7s  %s\n", "TIME", "HOST", "STAGE", "MESSAGE")
 	for ev := range events {
 		ts := ev.At.Format(tsFmt)
 		switch ev.Kind {
@@ -237,7 +276,7 @@ func printEvents(out io.Writer, events <-chan Event, suppressOutputLines bool) {
 			if ev.Kind == "stderr" {
 				kind = "ERR"
 			}
-			fmt.Fprintf(out, "%s  %-16s  %-3s  %s\n", ts, ev.Host, kind, ev.Message)
+			fmt.Fprintf(out, "%s  %-16s  %-7s  %s\n", ts, ev.Host, kind, ev.Message)
 		default:
 			kind := ev.Kind
 			switch ev.Kind {
@@ -271,18 +310,52 @@ func printSummary(out io.Writer, r Report) {
 	}
 
 	fmt.Fprintln(out, "")
-	fmt.Fprintln(out, "Summary")
-	fmt.Fprintf(out, "  Hosts: %d  OK: %d  Failed: %d  Duration: %s\n", len(r.Results), ok, fail, r.Duration)
+	fmt.Fprintf(out, "SUMMARY  hosts=%d  ok=%d  failed=%d  duration=%s\n", len(r.Results), ok, fail, r.Duration)
 	fmt.Fprintln(out, "")
+
+	if fail > 0 {
+		counts := map[string]int{}
+		for _, res := range r.Results {
+			if res.Status == StatusFailed && res.Error != "" {
+				counts[res.Error]++
+			}
+		}
+		type kv struct {
+			k string
+			v int
+		}
+		var xs []kv
+		for k, v := range counts {
+			xs = append(xs, kv{k: k, v: v})
+		}
+		sort.Slice(xs, func(i, j int) bool {
+			if xs[i].v == xs[j].v {
+				return xs[i].k < xs[j].k
+			}
+			return xs[i].v > xs[j].v
+		})
+
+		fmt.Fprintln(out, "TOP FAILURES")
+		for i := 0; i < len(xs) && i < 3; i++ {
+			fmt.Fprintf(out, "%dx  %s\n", xs[i].v, xs[i].k)
+		}
+		fmt.Fprintln(out, "")
+	}
+
+	fmt.Fprintln(out, "RESULTS")
 
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "HOST\tSTATUS\tEXIT\tDURATION\tERROR")
 	for _, res := range r.Results {
+		status := "OK"
+		if res.Status != StatusSucceeded {
+			status = "FAIL"
+		}
 		errStr := ""
 		if res.Error != "" {
 			errStr = res.Error
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\n", res.Host, res.Status, res.ExitCode, res.Duration, errStr)
+		fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\n", res.Host, status, res.ExitCode, res.Duration, errStr)
 	}
 	_ = tw.Flush()
 }
