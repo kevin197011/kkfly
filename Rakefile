@@ -6,8 +6,46 @@
 # https://opensource.org/licenses/MIT
 
 require 'time'
+require 'open3'
 
 task default: %w[push]
+
+# 获取并递增语义化版本 tag（vMAJOR.MINOR.PATCH）
+def next_semver_tag(bump: ENV.fetch('BUMP', 'patch'))
+  # 尽量同步远程 tags，避免本地缺失导致重复
+  system('git fetch --tags --quiet')
+
+  tags_output, _stderr, _status = Open3.capture3("git tag --list 'v*' --sort=-v:refname")
+  latest = tags_output.lines.map(&:strip).find { |t| t.match?(/\Av\d+\.\d+\.\d+\z/) }
+
+  major, minor, patch =
+    if latest
+      latest.delete_prefix('v').split('.').map(&:to_i)
+    else
+      [0, 1, 0] # first tag: v0.1.0
+    end
+
+  case bump
+  when 'major'
+    major += 1
+    minor = 0
+    patch = 0
+  when 'minor'
+    minor += 1
+    patch = 0
+  else # patch
+    patch += 1
+  end
+
+  "v#{major}.#{minor}.#{patch}"
+end
+
+def create_git_tag(tag)
+  existing = `git tag -l "#{tag}" 2>&1`.strip
+  return false unless existing.empty?
+
+  system(%(git tag -a "#{tag}" -m "Release #{tag}"))
+end
 
 # 生成智能 commit message
 def generate_commit_message
@@ -245,8 +283,16 @@ task :push do
     end
   end
 
+  # 自动递增并创建 tag（默认 patch，可用 BUMP=minor|major）
+  tag = next_semver_tag
+  unless create_git_tag(tag)
+    puts "❌ 创建 tag 失败或已存在: #{tag}"
+    exit 1
+  end
+  puts "✅ 创建 tag: #{tag}"
+
   # 推送到远程
-  push_output = `git push origin main 2>&1`
+  push_output = `git push origin main "#{tag}" 2>&1`
   unless $?.success?
     puts '❌ 推送失败'
     puts push_output
