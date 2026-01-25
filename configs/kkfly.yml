@@ -1,0 +1,32 @@
+user: ubuntu
+private_key_path: ~/.ssh/id_ed25519
+private_key_content: ""
+# private_key_content: |
+#   -----BEGIN RSA PRIVATE KEY-----
+#   MIIEpAIBAAKCAQEAx3y7VuN1XhWf58UOuW491y/1Ym85J6OaxxSj1QOiQK0w1gV
+#   jE0xOiVdGpWJlI29Qm4D4jFqVwD3hQF11jN1WYvVlU8H1U0O0O0O0O0O0O0O0O
+#   0O0O0O0O0O0O0O0O0O0O0O0O0O0O0O0O0O0O0O0O0O0O0O0O0O0O0O0O0O0O0O0O
+#   0O0O0O0O0O0O0O0O0O0O0O0O0O0O0O0O0O0O0O0O0O0O0O0O0O0O0O0O0O0O0O0O
+
+port: 22
+
+concurrency: 20
+
+# Optional: run via sudo (non-interactive). Requires NOPASSWD on remote host.
+sudo: true
+
+# Optional: timeouts and output limits
+connect_timeout_seconds: 10
+command_timeout_seconds: 900
+max_output_bytes_per_stream: 262144
+
+# Required: remote command to run
+command: "curl -fsSL https://raw.githubusercontent.com/kevin197011/krun/main/lib/check-ip-quality.sh | bash"
+
+# Optional: SSH host key verification
+# known_hosts_path: ~/.ssh/known_hosts
+# strict_host_key_checking: true
+
+hosts:
+  - 1.2.3.4
+  - example.com
