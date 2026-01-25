@@ -8,24 +8,22 @@ set -o errexit
 set -o nounset
 set -o pipefail
 
-# curl exec:
-# curl -fsSL https://raw.githubusercontent.com/kevin197011/kkfly/main/install.sh | bash
-
 # --- vars ---
 readonly REPO="kevin197011/kkfly"
 readonly BINARY_NAME="kkfly"
 readonly INSTALL_DIR="/usr/local/bin"
 readonly INSTALL_PATH="${INSTALL_DIR}/${BINARY_NAME}"
 
+# 定义全局变量，防止 nounset 在 trap 中报错
+TMP_DIR=""
+
 # --- run code ---
-# 自动识别平台并调用对应函数
 kkfly::install::run() {
     local platform='debian'
     command -v yum >/dev/null && platform='centos'
     command -v dnf >/dev/null && platform='centos'
     command -v brew >/dev/null && platform='mac'
     
-    # 权限检查：除了 Mac Brew 环境外通常需要 root
     if [[ "${platform}" != "mac" && "$EUID" -ne 0 ]]; then
         echo "❌ Error: Please run as root (use sudo)"
         exit 1
@@ -34,42 +32,29 @@ kkfly::install::run() {
     eval "kkfly::install::${platform}" "$@"
 }
 
-# --- centos code ---
-kkfly::install::centos() {
-    kkfly::install::common
-}
-
-# --- debian code ---
-kkfly::install::debian() {
-    kkfly::install::common
-}
-
-# --- mac code ---
-kkfly::install::mac() {
-    # 如果是 Mac，可能需要安装到不同的路径或处理不同的架构名
-    kkfly::install::common
-}
+kkfly::install::centos() { kkfly::install::common; }
+kkfly::install::debian() { kkfly::install::common; }
+kkfly::install::mac()    { kkfly::install::common; }
 
 # --- common code ---
 kkfly::install::common() {
-    local tmp_dir
-    tmp_dir=$(mktemp -d -t kkfly_XXXXXX)
-    trap 'rm -rf "${tmp_dir}"' EXIT # 确保退出时清理
+    # 使用全局变量 TMP_DIR
+    TMP_DIR=$(mktemp -d -t kkfly_XXXXXX)
+    trap '[[ -n "${TMP_DIR:-}" ]] && rm -rf "${TMP_DIR}"' EXIT
     
-    cd "${tmp_dir}"
+    cd "${TMP_DIR}"
 
     echo "🔍 Checking latest version..."
     local version
     version=$(curl -s "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name":' | sed -E 's/.*"v?([^"]+)".*/\1/')
     
     if [[ -z "${version}" ]]; then
-        version="0.1.5" # fallback
+        version="0.1.11"
         echo "⚠️  Fallback to version ${version}"
     else
         echo "✨ Found latest version: v${version}"
     fi
 
-    # 识别系统架构
     local arch
     arch=$(uname -m)
     case "${arch}" in
@@ -79,7 +64,6 @@ kkfly::install::common() {
     esac
 
     local filename="${BINARY_NAME}_${version}_linux_${arch}.tar.gz"
-    # 如果是 Mac，调整文件名后缀
     [[ "$(uname)" == "Darwin" ]] && filename="${BINARY_NAME}_${version}_darwin_${arch}.tar.gz"
 
     local url="https://github.com/${REPO}/releases/download/v${version}/${filename}"
@@ -90,12 +74,11 @@ kkfly::install::common() {
     echo "📦 Extracting..."
     tar -zxf "${filename}"
 
-    # 寻找二进制文件
     local target
     target=$(find . -type f -name "${BINARY_NAME}" -perm -u+x | head -n 1)
 
     if [[ -z "${target}" ]]; then
-        echo "❌ Error: Binary ${BINARY_NAME} not found in package"
+        echo "❌ Error: Binary ${BINARY_NAME} not found"
         exit 1
     fi
 
@@ -112,5 +95,4 @@ kkfly::install::common() {
     fi
 }
 
-# --- run main ---
 kkfly::install::run "$@"
