@@ -38,9 +38,10 @@ kkfly::install::common() {
     local tmp_dir
     tmp_dir=$(mktemp -d -t kkfly_XXXXXX)
 
-    # 【关键修复】：在定义 trap 时使用双引号，直接将 $tmp_dir 的值写入。
-    # 这样即使函数结束了，trap 里的路径已经是死字符串，不再依赖变量名。
-    trap "rm -rf '${tmp_dir}'" EXIT
+    # 【彻底修复点】：
+    # 1. 使用 ${tmp_dir:-} 语法，如果变量未定义则返回空字符串，绕过 nounset
+    # 2. 只有在变量不为空时才执行 rm，增加安全性
+    trap '[[ -n "${tmp_dir:-}" ]] && rm -rf "${tmp_dir}"' EXIT
     
     cd "${tmp_dir}"
 
@@ -49,7 +50,7 @@ kkfly::install::common() {
     version=$(curl -s "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name":' | sed -E 's/.*"v?([^"]+)".*/\1/')
     
     if [[ -z "${version}" ]]; then
-        version="0.1.11"
+        version="0.1.13"
         echo "⚠️  Fallback to version ${version}"
     else
         echo "✨ Found latest version: v${version}"
