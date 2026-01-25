@@ -17,6 +17,7 @@ KKFLY_REPO="${KKFLY_REPO:-kevin197011/kkfly}"
 KKFLY_VERSION="${KKFLY_VERSION:-}"
 KKFLY_BIN_DIR="${KKFLY_BIN_DIR:-/usr/local/bin}"
 KKFLY_VERBOSE="${KKFLY_VERBOSE:-0}"
+KKFLY_DOWNLOAD_PREFIX="${KKFLY_DOWNLOAD_PREFIX:-}"
 
 kkfly::install::usage() {
     cat <<'EOF'
@@ -99,16 +100,18 @@ kkfly::install::resolve_latest_tag() {
 kkfly::install::download_file() {
     local url="$1"
     local dest="$2"
+    local full_url="${url}"
+    [[ -n "${KKFLY_DOWNLOAD_PREFIX}" ]] && full_url="${KKFLY_DOWNLOAD_PREFIX}${url}"
     if command -v curl >/dev/null 2>&1; then
-        if ! curl -fL -sS --retry 3 --retry-delay 1 -o "${dest}" "${url}"; then
-            kkfly::install::die "Download failed: ${url}"
+        if ! curl -fL -sS --retry 3 --retry-delay 1 -o "${dest}" "${full_url}"; then
+            kkfly::install::die "Download failed: ${full_url}"
         fi
         kkfly::install::log "Downloaded $(basename "${dest}")"
         return 0
     fi
     if command -v wget >/dev/null 2>&1; then
-        if ! wget -nv -O "${dest}" "${url}" 2>/dev/null; then
-            kkfly::install::die "Download failed: ${url}"
+        if ! wget -nv -O "${dest}" "${full_url}" 2>/dev/null; then
+            kkfly::install::die "Download failed: ${full_url}"
         fi
         kkfly::install::log "Downloaded $(basename "${dest}")"
         return 0
@@ -270,6 +273,8 @@ kkfly::install::install() {
 
     kkfly::install::log "Release tag: ${tag}"
     kkfly::install::log "Asset: ${asset_url}"
+    kkfly::install::log "Bin dir: ${KKFLY_BIN_DIR}"
+    [[ -n "${KKFLY_DOWNLOAD_PREFIX}" ]] && kkfly::install::log "Download prefix: ${KKFLY_DOWNLOAD_PREFIX}"
 
     local tmpdir archive_path checksums_path extracted_bin
     tmpdir="$(mktemp -d -t kkfly-install.XXXXXX)"
