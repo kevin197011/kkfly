@@ -8,6 +8,7 @@ import (
 	"os"
 	"sort"
 	"sync"
+	"text/tabwriter"
 	"time"
 
 	"github.com/kevin197011/kkfly/internal/config"
@@ -224,20 +225,37 @@ func runOne(ctx context.Context, cfg config.Config, host string, events chan<- E
 }
 
 func printEvents(out io.Writer, events <-chan Event, suppressOutputLines bool) {
+	const tsFmt = "2006-01-02 15:04:05"
 	for ev := range events {
-		ts := ev.At.Format(time.RFC3339)
+		ts := ev.At.Format(tsFmt)
 		switch ev.Kind {
 		case "stdout", "stderr":
 			if suppressOutputLines {
 				continue
 			}
-			fmt.Fprintf(out, "%s [%s] %s: %s\n", ts, ev.Host, ev.Kind, ev.Message)
-		default:
-			if ev.Message != "" {
-				fmt.Fprintf(out, "%s [%s] %s: %s\n", ts, ev.Host, ev.Kind, ev.Message)
-			} else {
-				fmt.Fprintf(out, "%s [%s] %s\n", ts, ev.Host, ev.Kind)
+			kind := "OUT"
+			if ev.Kind == "stderr" {
+				kind = "ERR"
 			}
+			fmt.Fprintf(out, "%s  %-16s  %-3s  %s\n", ts, ev.Host, kind, ev.Message)
+		default:
+			kind := ev.Kind
+			switch ev.Kind {
+			case "queued":
+				kind = "QUEUED"
+			case "connecting":
+				kind = "CONNECT"
+			case "running":
+				kind = "RUN"
+			case "finished":
+				kind = "DONE"
+			}
+
+			if ev.Message != "" {
+				fmt.Fprintf(out, "%s  %-16s  %-7s  %s\n", ts, ev.Host, kind, ev.Message)
+				continue
+			}
+			fmt.Fprintf(out, "%s  %-16s  %-7s\n", ts, ev.Host, kind)
 		}
 	}
 }
@@ -252,15 +270,21 @@ func printSummary(out io.Writer, r Report) {
 		}
 	}
 
-	fmt.Fprintln(out, "---- summary ----")
-	fmt.Fprintf(out, "hosts=%d success=%d failed=%d duration=%s\n", len(r.Results), ok, fail, r.Duration)
+	fmt.Fprintln(out, "")
+	fmt.Fprintln(out, "Summary")
+	fmt.Fprintf(out, "  Hosts: %d  OK: %d  Failed: %d  Duration: %s\n", len(r.Results), ok, fail, r.Duration)
+	fmt.Fprintln(out, "")
+
+	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "HOST\tSTATUS\tEXIT\tDURATION\tERROR")
 	for _, res := range r.Results {
-		line := fmt.Sprintf("%-24s %-10s exit=%-4d dur=%s", res.Host, res.Status, res.ExitCode, res.Duration)
+		errStr := ""
 		if res.Error != "" {
-			line += " err=" + res.Error
+			errStr = res.Error
 		}
-		fmt.Fprintln(out, line)
+		fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\n", res.Host, res.Status, res.ExitCode, res.Duration, errStr)
 	}
+	_ = tw.Flush()
 }
 
 func writeJSON(path string, report Report) error {

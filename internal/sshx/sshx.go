@@ -110,7 +110,6 @@ func Exec(
 ) (ExecResult, error) {
 	var res ExecResult
 	res.Started = time.Now()
-	defer func() { res.Finished = time.Now() }()
 
 	sess, err := client.NewSession()
 	if err != nil {
@@ -172,6 +171,7 @@ func Exec(
 	res.Stdout = stdoutBuf.Buf.String()
 	res.Stderr = stderrBuf.Buf.String()
 	res.ExitCode = 0
+	res.Finished = time.Now()
 
 	if runErr == nil {
 		return res, nil
