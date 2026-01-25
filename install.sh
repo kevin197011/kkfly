@@ -14,9 +14,6 @@ readonly BINARY_NAME="kkfly"
 readonly INSTALL_DIR="/usr/local/bin"
 readonly INSTALL_PATH="${INSTALL_DIR}/${BINARY_NAME}"
 
-# 定义全局变量，防止 nounset 在 trap 中报错
-TMP_DIR=""
-
 # --- run code ---
 kkfly::install::run() {
     local platform='debian'
@@ -38,11 +35,14 @@ kkfly::install::mac()    { kkfly::install::common; }
 
 # --- common code ---
 kkfly::install::common() {
-    # 使用全局变量 TMP_DIR
-    TMP_DIR=$(mktemp -d -t kkfly_XXXXXX)
-    trap '[[ -n "${TMP_DIR:-}" ]] && rm -rf "${TMP_DIR}"' EXIT
+    local tmp_dir
+    tmp_dir=$(mktemp -d -t kkfly_XXXXXX)
+
+    # 【关键修复】：在定义 trap 时使用双引号，直接将 $tmp_dir 的值写入。
+    # 这样即使函数结束了，trap 里的路径已经是死字符串，不再依赖变量名。
+    trap "rm -rf '${tmp_dir}'" EXIT
     
-    cd "${TMP_DIR}"
+    cd "${tmp_dir}"
 
     echo "🔍 Checking latest version..."
     local version
