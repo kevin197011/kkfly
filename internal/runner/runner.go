@@ -55,14 +55,95 @@ type Event struct {
 type Options struct {
 	JSONOutPath string
 	Output      io.Writer
+	LogOutput   io.Writer
+}
+
+const (
+	ansiReset = "\x1b[0m"
+	ansiBold  = "\x1b[1m"
+	ansiDim   = "\x1b[90m"
+
+	ansiRed    = "\x1b[31m"
+	ansiGreen  = "\x1b[32m"
+	ansiYellow = "\x1b[33m"
+	ansiCyan   = "\x1b[36m"
+)
+
+type dualOut struct {
+	term  io.Writer
+	log   io.Writer
+	color bool
+}
+
+func (d dualOut) write(plain, colored string) {
+	if d.term != nil {
+		if d.color && colored != "" {
+			_, _ = io.WriteString(d.term, colored)
+		} else {
+			_, _ = io.WriteString(d.term, plain)
+		}
+	}
+	if d.log != nil {
+		_, _ = io.WriteString(d.log, plain)
+	}
+}
+
+func isTerminal(w io.Writer) bool {
+	f, ok := w.(*os.File)
+	if !ok {
+		return false
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return (fi.Mode() & os.ModeCharDevice) != 0
+}
+
+func supportsColor(w io.Writer) bool {
+	if os.Getenv("NO_COLOR") != "" || os.Getenv("KKFLY_NO_COLOR") != "" {
+		return false
+	}
+	term := strings.ToLower(os.Getenv("TERM"))
+	if term == "" || term == "dumb" {
+		return false
+	}
+	return isTerminal(w)
+}
+
+func padRight(s string, width int) string {
+	if len(s) >= width {
+		return s
+	}
+	return s + strings.Repeat(" ", width-len(s))
+}
+
+func colorize(code, s string) string {
+	return code + s + ansiReset
+}
+
+func coloredField(code, s string, width int) string {
+	if width < 0 {
+		width = 0
+	}
+	pad := width - len(s)
+	if pad < 0 {
+		pad = 0
+	}
+	return code + s + ansiReset + strings.Repeat(" ", pad)
 }
 
 func Run(ctx context.Context, cfg config.Config, opt Options) (Report, error) {
 	started := time.Now()
 
-	out := opt.Output
-	if out == nil {
-		out = os.Stdout
+	termOut := opt.Output
+	if termOut == nil {
+		termOut = os.Stdout
+	}
+	ow := dualOut{
+		term:  termOut,
+		log:   opt.LogOutput,
+		color: supportsColor(termOut),
 	}
 
 	// Header (audit-friendly, easy to copy/paste)
@@ -71,8 +152,7 @@ func Run(ctx context.Context, cfg config.Config, opt Options) (Report, error) {
 		if cfg.StrictHostKeyChecking != nil {
 			strict = *cfg.StrictHostKeyChecking
 		}
-		fmt.Fprintf(
-			out,
+		plainHeader := fmt.Sprintf(
 			"KKFLY RUN  %s  hosts=%d  conc=%d  sudo=%t  strict_host_key=%t\n",
 			started.Format("2006-01-02 15:04:05"),
 			len(cfg.Hosts),
@@ -80,11 +160,21 @@ func Run(ctx context.Context, cfg config.Config, opt Options) (Report, error) {
 			cfg.Sudo,
 			strict,
 		)
+		coloredHeader := plainHeader
+		if ow.color {
+			coloredHeader = colorize(ansiBold+ansiCyan, "KKFLY RUN") + plainHeader[len("KKFLY RUN"):]
+		}
+		ow.write(plainHeader, coloredHeader)
 		cmdLine := strings.Join(strings.Fields(cfg.Command), " ")
 		if cmdLine != "" {
-			fmt.Fprintf(out, "CMD: %s\n", cmdLine)
+			plain := fmt.Sprintf("CMD: %s\n", cmdLine)
+			colored := plain
+			if ow.color {
+				colored = colorize(ansiDim, "CMD:") + plain[len("CMD:"):]
+			}
+			ow.write(plain, colored)
 		}
-		fmt.Fprintln(out, "")
+		ow.write("\n", "\n")
 	}
 
 	events := make(chan Event, 4096)
@@ -94,7 +184,7 @@ func Run(ctx context.Context, cfg config.Config, opt Options) (Report, error) {
 	printWg.Add(1)
 	go func() {
 		defer printWg.Done()
-		printEvents(out, events, cfg.DisableStdoutStderrPrint)
+		printEvents(ow, events, cfg.DisableStdoutStderrPrint)
 	}()
 
 	jobs := make(chan string)
@@ -143,7 +233,7 @@ func Run(ctx context.Context, cfg config.Config, opt Options) (Report, error) {
 		Results:  results,
 	}
 
-	printSummary(out, report)
+	printSummary(ow, report)
 
 	if opt.JSONOutPath != "" {
 		if err := writeJSON(opt.JSONOutPath, report); err != nil {
@@ -262,44 +352,106 @@ func runOne(ctx context.Context, cfg config.Config, host string, events chan<- E
 	return hr
 }
 
-func printEvents(out io.Writer, events <-chan Event, suppressOutputLines bool) {
+func stageColor(stage, message string) string {
+	switch stage {
+	case "QUEUED":
+		return ansiDim
+	case "CONNECT":
+		return ansiYellow
+	case "RUN":
+		return ansiCyan
+	case "OUT":
+		return ansiGreen
+	case "ERR":
+		return ansiRed
+	case "DONE":
+		if strings.HasPrefix(message, "ok ") || strings.HasPrefix(message, "ok") {
+			return ansiGreen
+		}
+		if strings.HasPrefix(message, "fail ") || strings.HasPrefix(message, "fail") {
+			return ansiRed
+		}
+		return ansiYellow
+	default:
+		return ""
+	}
+}
+
+func printEvents(out dualOut, events <-chan Event, suppressOutputLines bool) {
 	const tsFmt = "2006-01-02 15:04:05"
-	fmt.Fprintf(out, "%-19s  %-16s  %-7s  %s\n", "TIME", "HOST", "STAGE", "MESSAGE")
+	plainHeader := fmt.Sprintf("%-19s  %-16s  %-7s  %s\n", "TIME", "HOST", "STAGE", "MESSAGE")
+	coloredHeader := plainHeader
+	if out.color {
+		coloredHeader = colorize(ansiBold, "TIME") + plainHeader[len("TIME"):]
+	}
+	out.write(plainHeader, coloredHeader)
 	for ev := range events {
 		ts := ev.At.Format(tsFmt)
+		host := ev.Host
 		switch ev.Kind {
 		case "stdout", "stderr":
 			if suppressOutputLines {
 				continue
 			}
-			kind := "OUT"
+			stage := "OUT"
 			if ev.Kind == "stderr" {
-				kind = "ERR"
+				stage = "ERR"
 			}
-			fmt.Fprintf(out, "%s  %-16s  %-7s  %s\n", ts, ev.Host, kind, ev.Message)
+			plain := fmt.Sprintf("%s  %-16s  %-7s  %s\n", ts, host, stage, ev.Message)
+			colored := plain
+			if out.color {
+				stageC := stageColor(stage, ev.Message)
+				colored = colorize(ansiDim, ts) + "  " +
+					padRight(host, 16) + "  " +
+					coloredField(stageC, stage, 7) + "  " +
+					ev.Message + "\n"
+			}
+			out.write(plain, colored)
 		default:
-			kind := ev.Kind
+			stage := ev.Kind
 			switch ev.Kind {
 			case "queued":
-				kind = "QUEUED"
+				stage = "QUEUED"
 			case "connecting":
-				kind = "CONNECT"
+				stage = "CONNECT"
 			case "running":
-				kind = "RUN"
+				stage = "RUN"
 			case "finished":
-				kind = "DONE"
+				stage = "DONE"
 			}
 
 			if ev.Message != "" {
-				fmt.Fprintf(out, "%s  %-16s  %-7s  %s\n", ts, ev.Host, kind, ev.Message)
+				plain := fmt.Sprintf("%s  %-16s  %-7s  %s\n", ts, host, stage, ev.Message)
+				colored := plain
+				if out.color {
+					stageC := stageColor(stage, ev.Message)
+					msg := ev.Message
+					// Highlight ok/fail token at the start of DONE message.
+					if stage == "DONE" && strings.HasPrefix(msg, "ok") {
+						msg = colorize(ansiGreen, "ok") + msg[2:]
+					} else if stage == "DONE" && strings.HasPrefix(msg, "fail") {
+						msg = colorize(ansiRed, "fail") + msg[4:]
+					}
+					colored = colorize(ansiDim, ts) + "  " +
+						padRight(host, 16) + "  " +
+						coloredField(stageC, stage, 7) + "  " +
+						msg + "\n"
+				}
+				out.write(plain, colored)
 				continue
 			}
-			fmt.Fprintf(out, "%s  %-16s  %-7s\n", ts, ev.Host, kind)
+			plain := fmt.Sprintf("%s  %-16s  %-7s\n", ts, host, stage)
+			colored := plain
+			if out.color {
+				stageC := stageColor(stage, "")
+				colored = colorize(ansiDim, ts) + "  " + padRight(host, 16) + "  " + coloredField(stageC, stage, 7) + "\n"
+			}
+			out.write(plain, colored)
 		}
 	}
 }
 
-func printSummary(out io.Writer, r Report) {
+func printSummary(out dualOut, r Report) {
 	var ok, fail int
 	for _, res := range r.Results {
 		if res.Status == StatusSucceeded {
@@ -309,9 +461,23 @@ func printSummary(out io.Writer, r Report) {
 		}
 	}
 
-	fmt.Fprintln(out, "")
-	fmt.Fprintf(out, "SUMMARY  hosts=%d  ok=%d  failed=%d  duration=%s\n", len(r.Results), ok, fail, r.Duration)
-	fmt.Fprintln(out, "")
+	out.write("\n", "\n")
+	plainSum := fmt.Sprintf("SUMMARY  hosts=%d  ok=%d  failed=%d  duration=%s\n", len(r.Results), ok, fail, r.Duration)
+	coloredSum := plainSum
+	if out.color {
+		coloredSum = "SUMMARY  " +
+			"hosts=" + fmt.Sprintf("%d", len(r.Results)) + "  " +
+			"ok=" + colorize(ansiGreen, fmt.Sprintf("%d", ok)) + "  " +
+			"failed=" + func() string {
+			if fail == 0 {
+				return colorize(ansiGreen, "0")
+			}
+			return colorize(ansiRed, fmt.Sprintf("%d", fail))
+		}() + "  " +
+			"duration=" + r.Duration + "\n"
+	}
+	out.write(plainSum, coloredSum)
+	out.write("\n", "\n")
 
 	if fail > 0 {
 		counts := map[string]int{}
@@ -335,29 +501,83 @@ func printSummary(out io.Writer, r Report) {
 			return xs[i].v > xs[j].v
 		})
 
-		fmt.Fprintln(out, "TOP FAILURES")
+		out.write("TOP FAILURES\n", colorize(ansiBold, "TOP FAILURES")+"\n")
 		for i := 0; i < len(xs) && i < 3; i++ {
-			fmt.Fprintf(out, "%dx  %s\n", xs[i].v, xs[i].k)
+			plain := fmt.Sprintf("%dx  %s\n", xs[i].v, xs[i].k)
+			colored := plain
+			if out.color {
+				colored = colorize(ansiRed, fmt.Sprintf("%dx", xs[i].v)) + plain[len(fmt.Sprintf("%dx", xs[i].v)):] // keep remainder
+			}
+			out.write(plain, colored)
 		}
-		fmt.Fprintln(out, "")
+		out.write("\n", "\n")
 	}
 
-	fmt.Fprintln(out, "RESULTS")
-
-	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "HOST\tSTATUS\tEXIT\tDURATION\tERROR")
-	for _, res := range r.Results {
-		status := "OK"
-		if res.Status != StatusSucceeded {
-			status = "FAIL"
+	// Plain (log-friendly): tabwriter
+	{
+		var b strings.Builder
+		b.WriteString("RESULTS\n")
+		tw := tabwriter.NewWriter(&b, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(tw, "HOST\tSTATUS\tEXIT\tDURATION\tERROR")
+		for _, res := range r.Results {
+			status := "OK"
+			if res.Status != StatusSucceeded {
+				status = "FAIL"
+			}
+			errStr := ""
+			if res.Error != "" {
+				errStr = res.Error
+			}
+			fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\n", res.Host, status, res.ExitCode, res.Duration, errStr)
 		}
-		errStr := ""
-		if res.Error != "" {
-			errStr = res.Error
-		}
-		fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\n", res.Host, status, res.ExitCode, res.Duration, errStr)
+		_ = tw.Flush()
+		out.write(b.String(), "")
 	}
-	_ = tw.Flush()
+
+	// Colored (terminal-friendly): fixed-width columns (avoid tabwriter width issues with ANSI)
+	if out.color {
+		hostW := len("HOST")
+		durW := len("DURATION")
+		for _, res := range r.Results {
+			if len(res.Host) > hostW {
+				hostW = len(res.Host)
+			}
+			if len(res.Duration) > durW {
+				durW = len(res.Duration)
+			}
+		}
+		if hostW < 16 {
+			hostW = 16
+		}
+
+		var b strings.Builder
+		b.WriteString(colorize(ansiBold, "RESULTS") + "\n")
+		b.WriteString(
+			padRight("HOST", hostW) + "  " +
+				padRight("STATUS", 6) + "  " +
+				padRight("EXIT", 4) + "  " +
+				padRight("DURATION", durW) + "  " +
+				"ERROR\n",
+		)
+		for _, res := range r.Results {
+			status := "OK"
+			statusC := ansiGreen
+			if res.Status != StatusSucceeded {
+				status = "FAIL"
+				statusC = ansiRed
+			}
+			exitStr := fmt.Sprintf("%d", res.ExitCode)
+			errStr := res.Error
+			b.WriteString(
+				padRight(res.Host, hostW) + "  " +
+					coloredField(statusC, status, 6) + "  " +
+					padRight(exitStr, 4) + "  " +
+					padRight(res.Duration, durW) + "  " +
+					errStr + "\n",
+			)
+		}
+		out.write("", b.String())
+	}
 }
 
 func writeJSON(path string, report Report) error {

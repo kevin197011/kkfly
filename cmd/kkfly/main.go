@@ -107,13 +107,14 @@ func main() {
 			fmt.Fprintf(os.Stderr, "warn: failed to open kkfly.log: %v\n", err)
 		} else {
 			defer logFile.Close()
-			out = io.MultiWriter(os.Stdout, logFile)
+			out = os.Stdout
 		}
 	}
 
 	report, err := runner.Run(context.Background(), cfg, runner.Options{
 		JSONOutPath: jsonOut,
 		Output:      out,
+		LogOutput:   logFile,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: run failed: %v\n", err)
