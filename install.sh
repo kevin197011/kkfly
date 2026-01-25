@@ -74,103 +74,51 @@ kkfly::install::detect_platform() {
     echo "${os} ${arch}"
 }
 
-kkfly::install::json_tag_name() {
-    if command -v jq >/dev/null 2>&1; then
-        jq -r '.tag_name // empty'
-        return 0
-    fi
-    if command -v python3 >/dev/null 2>&1; then
-        python3 - <<'PY'
-import json, sys
-data = json.load(sys.stdin)
-print(data.get("tag_name", ""))
-PY
-        return 0
-    fi
-    if command -v python >/dev/null 2>&1; then
-        python - <<'PY'
-import json, sys
-data = json.load(sys.stdin)
-print(data.get("tag_name", ""))
-PY
-        return 0
-    fi
-    kkfly::install::die "Need jq or python3 to parse GitHub API JSON"
+kkfly::install::normalize_tag() {
+    local tag="$1"
+    [[ "${tag}" == v* ]] || tag="v${tag}"
+    echo "${tag}"
 }
 
-kkfly::install::json_asset_url_by_name() {
-    local asset_name="$1"
-    if command -v jq >/dev/null 2>&1; then
-        jq -r --arg name "${asset_name}" '.assets[]? | select(.name == $name) | .browser_download_url // empty' | head -n1
-        return 0
-    fi
-    if command -v python3 >/dev/null 2>&1; then
-        python3 - "${asset_name}" <<'PY'
-import json, sys
-name = sys.argv[1]
-data = json.load(sys.stdin)
-for a in data.get("assets", []) or []:
-  if a.get("name") == name:
-    print(a.get("browser_download_url", ""))
-    break
-PY
-        return 0
-    fi
-    if command -v python >/dev/null 2>&1; then
-        python - "${asset_name}" <<'PY'
-import json, sys
-name = sys.argv[1]
-data = json.load(sys.stdin)
-for a in data.get("assets", []) or []:
-  if a.get("name") == name:
-    print(a.get("browser_download_url", ""))
-    break
-PY
-        return 0
-    fi
-    kkfly::install::die "Need jq or python3 to parse GitHub API JSON"
-}
+kkfly::install::resolve_latest_tag() {
+    local repo="$1"
+    local url="https://github.com/${repo}/releases/latest"
 
-kkfly::install::download_cmd() {
+    # Prefer curl because it can reliably return the final URL after redirects.
     if command -v curl >/dev/null 2>&1; then
-        echo "curl -fsSL --retry 3 --retry-delay 1 -L"
+        local final
+        final="$(curl -fL -sS -o /dev/null -w '%{url_effective}' "${url}")" || return 1
+        [[ -n "${final}" ]] || return 1
+        echo "${final##*/}"
         return 0
     fi
-    if command -v wget >/dev/null 2>&1; then
-        echo "wget -qO-"
-        return 0
-    fi
-    return 1
-}
 
-kkfly::install::github_api_get() {
-    local url="$1"
-    local cmd
-    cmd="$(kkfly::install::download_cmd)" || kkfly::install::die "Error: curl or wget is required"
-    # GitHub API requires headers; wget cannot set these easily in a portable way.
-    if [[ "${cmd}" == curl* ]]; then
-        curl -fsSL --retry 3 --retry-delay 1 -L \
-            -H "User-Agent: kkfly-installer" \
-            -H "Accept: application/vnd.github+json" \
-            "${url}"
+    # Fallback: parse Location headers from wget spider output.
+    if command -v wget >/dev/null 2>&1; then
+        local loc
+        loc="$(wget -S --spider "${url}" 2>&1 | awk '/^  Location: /{print $2}' | tail -n1 | tr -d '\r')" || true
+        [[ -n "${loc}" ]] || return 1
+        echo "${loc##*/}"
         return 0
     fi
-    kkfly::install::die "Error: curl is required for GitHub API requests"
+
+    return 1
 }
 
 kkfly::install::download_file() {
     local url="$1"
     local dest="$2"
     if command -v curl >/dev/null 2>&1; then
-        curl -fsSL --retry 3 --retry-delay 1 -L -o "${dest}" \
-            -H "User-Agent: kkfly-installer" \
-            -H "Accept: application/octet-stream" \
-            "${url}"
+        if ! curl -fL -sS --retry 3 --retry-delay 1 -o "${dest}" "${url}"; then
+            kkfly::install::die "Download failed: ${url}"
+        fi
         kkfly::install::log "Downloaded $(basename "${dest}")"
         return 0
     fi
     if command -v wget >/dev/null 2>&1; then
-        wget -qO "${dest}" "${url}"
+        if ! wget -nv -O "${dest}" "${url}" 2>/dev/null; then
+            kkfly::install::die "Download failed: ${url}"
+        fi
         kkfly::install::log "Downloaded $(basename "${dest}")"
         return 0
     fi
@@ -292,22 +240,20 @@ kkfly::install::parse_args() {
 }
 
 kkfly::install::install_deps_centos() {
-    if command -v python3 >/dev/null 2>&1 && command -v curl >/dev/null 2>&1 && command -v tar >/dev/null 2>&1; then
+    if (command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1) && command -v tar >/dev/null 2>&1; then
         return 0
     fi
     echo "Installing dependencies..."
     local sudo_cmd
     sudo_cmd="$(kkfly::install::sudo_prefix)"
     if command -v dnf >/dev/null 2>&1; then
-        ! command -v python3 >/dev/null 2>&1 && ${sudo_cmd} dnf install -y python3
-        ! command -v curl >/dev/null 2>&1 && ${sudo_cmd} dnf install -y curl
+        ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1 && ${sudo_cmd} dnf install -y curl
         ! command -v tar >/dev/null 2>&1 && ${sudo_cmd} dnf install -y tar
         ! command -v awk >/dev/null 2>&1 && ${sudo_cmd} dnf install -y gawk
         ! command -v install >/dev/null 2>&1 && ${sudo_cmd} dnf install -y coreutils
         ! command -v sha256sum >/dev/null 2>&1 && ${sudo_cmd} dnf install -y coreutils
     else
-        ! command -v python3 >/dev/null 2>&1 && ${sudo_cmd} yum install -y python3
-        ! command -v curl >/dev/null 2>&1 && ${sudo_cmd} yum install -y curl
+        ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1 && ${sudo_cmd} yum install -y curl
         ! command -v tar >/dev/null 2>&1 && ${sudo_cmd} yum install -y tar
         ! command -v awk >/dev/null 2>&1 && ${sudo_cmd} yum install -y gawk
         ! command -v install >/dev/null 2>&1 && ${sudo_cmd} yum install -y coreutils
@@ -316,15 +262,14 @@ kkfly::install::install_deps_centos() {
 }
 
 kkfly::install::install_deps_debian() {
-    if command -v python3 >/dev/null 2>&1 && command -v curl >/dev/null 2>&1 && command -v tar >/dev/null 2>&1; then
+    if (command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1) && command -v tar >/dev/null 2>&1; then
         return 0
     fi
     echo "Installing dependencies..."
     local sudo_cmd
     sudo_cmd="$(kkfly::install::sudo_prefix)"
     ${sudo_cmd} apt-get update -qq
-    ! command -v python3 >/dev/null 2>&1 && ${sudo_cmd} apt-get install -y python3
-    ! command -v curl >/dev/null 2>&1 && ${sudo_cmd} apt-get install -y curl
+    ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1 && ${sudo_cmd} apt-get install -y curl
     ! command -v tar >/dev/null 2>&1 && ${sudo_cmd} apt-get install -y tar
     ! command -v awk >/dev/null 2>&1 && ${sudo_cmd} apt-get install -y gawk
     ! command -v install >/dev/null 2>&1 && ${sudo_cmd} apt-get install -y coreutils
@@ -332,15 +277,14 @@ kkfly::install::install_deps_debian() {
 }
 
 kkfly::install::install_deps_mac() {
-    if command -v python3 >/dev/null 2>&1 && command -v curl >/dev/null 2>&1 && command -v tar >/dev/null 2>&1; then
+    if command -v curl >/dev/null 2>&1 && command -v tar >/dev/null 2>&1; then
         return 0
     fi
     echo "Installing dependencies..."
     if ! command -v brew >/dev/null 2>&1; then
         echo "Installing Homebrew..."
-        /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+        /bin/bash -c "$(curl -fL -sS https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
     fi
-    ! command -v python3 >/dev/null 2>&1 && brew install python3
     ! command -v curl >/dev/null 2>&1 && brew install curl
     ! command -v gtar >/dev/null 2>&1 && brew install gnu-tar
     ! command -v sha256sum >/dev/null 2>&1 && brew install coreutils
@@ -378,26 +322,22 @@ kkfly::install::install() {
     read -r OS ARCH < <(kkfly::install::detect_platform)
     [[ "${OS}" != "windows" ]] || kkfly::install::die "Windows install via this script is not supported. Please download the release asset manually."
 
-    local release_url tag release_json tag_name version_for_asset asset_name asset_url checksums_url
+    local tag version_for_asset asset_name base_url asset_url checksums_url
     if [[ -z "${KKFLY_VERSION}" ]]; then
-        release_url="https://api.github.com/repos/${KKFLY_REPO}/releases/latest"
+        tag="$(kkfly::install::resolve_latest_tag "${KKFLY_REPO}")" \
+            || kkfly::install::die "Unable to resolve latest release tag (check GitHub connectivity)"
     else
-        tag="${KKFLY_VERSION}"
-        [[ "${tag}" == v* ]] || tag="v${tag}"
-        release_url="https://api.github.com/repos/${KKFLY_REPO}/releases/tags/${tag}"
+        tag="$(kkfly::install::normalize_tag "${KKFLY_VERSION}")"
     fi
 
-    release_json="$(kkfly::install::github_api_get "${release_url}")"
-    tag_name="$(printf '%s' "${release_json}" | kkfly::install::json_tag_name)"
-    [[ -n "${tag_name}" ]] || kkfly::install::die "Unable to read tag_name from GitHub API response"
-    version_for_asset="${tag_name#v}"
-
+    version_for_asset="${tag#v}"
     asset_name="kkfly_${version_for_asset}_${OS}_${ARCH}.tar.gz"
-    asset_url="$(printf '%s' "${release_json}" | kkfly::install::json_asset_url_by_name "${asset_name}")"
-    [[ -n "${asset_url}" ]] || kkfly::install::die "No asset found for ${OS}/${ARCH}: ${asset_name}"
+    base_url="https://github.com/${KKFLY_REPO}/releases/download/${tag}"
+    asset_url="${base_url}/${asset_name}"
+    checksums_url="${base_url}/checksums.txt"
 
-    checksums_url="$(printf '%s' "${release_json}" | kkfly::install::json_asset_url_by_name "checksums.txt")"
-    [[ -n "${checksums_url}" ]] || kkfly::install::die "Missing checksums.txt in release assets"
+    kkfly::install::log "Release tag: ${tag}"
+    kkfly::install::log "Asset: ${asset_url}"
 
     local tmpdir archive_path checksums_path extracted_bin
     tmpdir="$(mktemp -d -t kkfly-install.XXXXXX)"
@@ -406,7 +346,9 @@ kkfly::install::install() {
     archive_path="${tmpdir}/${asset_name}"
     checksums_path="${tmpdir}/checksums.txt"
 
+    echo "Downloading ${asset_name}..."
     kkfly::install::download_file "${asset_url}" "${archive_path}"
+    echo "Downloading checksums.txt..."
     kkfly::install::download_file "${checksums_url}" "${checksums_path}"
 
     kkfly::install::verify_checksum "${archive_path}" "${checksums_path}"
