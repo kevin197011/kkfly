@@ -36,6 +36,12 @@ Minimum required fields:
 ./kkfly
 ```
 
+Print version:
+
+```bash
+./kkfly --version
+```
+
 Write a JSON report:
 
 ```bash

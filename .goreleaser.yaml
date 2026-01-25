@@ -12,6 +12,11 @@ builds:
     binary: kkfly
     env:
       - CGO_ENABLED=0
+    ldflags:
+      - -s -w
+      - -X main.Version=v{{ .Version }}
+      - -X main.Commit={{ .Commit }}
+      - -X main.BuildDate={{ .Date }}
     goos:
       - linux
       - darwin
