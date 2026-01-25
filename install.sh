@@ -44,15 +44,6 @@ kkfly::install::need_cmd() {
     command -v "$1" >/dev/null 2>&1 || kkfly::install::die "Missing required command: $1"
 }
 
-kkfly::install::sudo_prefix() {
-    if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
-        echo ""
-        return 0
-    fi
-    command -v sudo >/dev/null 2>&1 || kkfly::install::die "This installer requires root or sudo"
-    echo "sudo"
-}
-
 kkfly::install::detect_platform() {
     local os arch uos uarch
     uos="$(uname -s 2>/dev/null || true)"
@@ -187,13 +178,28 @@ kkfly::install::extract_tar_gz_binary() {
     echo "${extracted_path}"
 }
 
+kkfly::install::copy_binary() {
+    local src="$1"
+    local dest="$2"
+
+    mkdir -p "$(dirname "${dest}")"
+
+    if command -v install >/dev/null 2>&1; then
+        install -m 0755 "${src}" "${dest}"
+        return 0
+    fi
+
+    cp "${src}" "${dest}"
+    chmod 0755 "${dest}"
+}
+
 kkfly::install::install_binary() {
     local src="$1"
     local dest="$2"
 
     mkdir -p "$(dirname "${dest}")"
 
-    if install -m 0755 "${src}" "${dest}" 2>/dev/null; then
+    if kkfly::install::copy_binary "${src}" "${dest}" 2>/dev/null; then
         return 0
     fi
 
@@ -202,7 +208,7 @@ kkfly::install::install_binary() {
     fi
 
     # Non-interactive sudo; fails fast if password is required.
-    sudo -n install -m 0755 "${src}" "${dest}" \
+    sudo -n bash -c "mkdir -p \"$(dirname "${dest}")\" && (command -v install >/dev/null 2>&1 && install -m 0755 \"${src}\" \"${dest}\" || (cp \"${src}\" \"${dest}\" && chmod 0755 \"${dest}\"))" \
         || kkfly::install::die "sudo failed installing to ${dest} (ensure NOPASSWD or use --bin-dir)"
 }
 
@@ -239,85 +245,11 @@ kkfly::install::parse_args() {
     done
 }
 
-kkfly::install::install_deps_centos() {
-    if (command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1) && command -v tar >/dev/null 2>&1; then
-        return 0
-    fi
-    echo "Installing dependencies..."
-    local sudo_cmd
-    sudo_cmd="$(kkfly::install::sudo_prefix)"
-    if command -v dnf >/dev/null 2>&1; then
-        ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1 && ${sudo_cmd} dnf install -y curl
-        ! command -v tar >/dev/null 2>&1 && ${sudo_cmd} dnf install -y tar
-        ! command -v awk >/dev/null 2>&1 && ${sudo_cmd} dnf install -y gawk
-        ! command -v install >/dev/null 2>&1 && ${sudo_cmd} dnf install -y coreutils
-        ! command -v sha256sum >/dev/null 2>&1 && ${sudo_cmd} dnf install -y coreutils
-    else
-        ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1 && ${sudo_cmd} yum install -y curl
-        ! command -v tar >/dev/null 2>&1 && ${sudo_cmd} yum install -y tar
-        ! command -v awk >/dev/null 2>&1 && ${sudo_cmd} yum install -y gawk
-        ! command -v install >/dev/null 2>&1 && ${sudo_cmd} yum install -y coreutils
-        ! command -v sha256sum >/dev/null 2>&1 && ${sudo_cmd} yum install -y coreutils
-    fi
-}
-
-kkfly::install::install_deps_debian() {
-    if (command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1) && command -v tar >/dev/null 2>&1; then
-        return 0
-    fi
-    echo "Installing dependencies..."
-    local sudo_cmd
-    sudo_cmd="$(kkfly::install::sudo_prefix)"
-    ${sudo_cmd} apt-get update -qq
-    ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1 && ${sudo_cmd} apt-get install -y curl
-    ! command -v tar >/dev/null 2>&1 && ${sudo_cmd} apt-get install -y tar
-    ! command -v awk >/dev/null 2>&1 && ${sudo_cmd} apt-get install -y gawk
-    ! command -v install >/dev/null 2>&1 && ${sudo_cmd} apt-get install -y coreutils
-    ! command -v sha256sum >/dev/null 2>&1 && ${sudo_cmd} apt-get install -y coreutils
-}
-
-kkfly::install::install_deps_mac() {
-    if command -v curl >/dev/null 2>&1 && command -v tar >/dev/null 2>&1; then
-        return 0
-    fi
-    echo "Installing dependencies..."
-    if ! command -v brew >/dev/null 2>&1; then
-        echo "Installing Homebrew..."
-        /bin/bash -c "$(curl -fL -sS https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-    fi
-    ! command -v curl >/dev/null 2>&1 && brew install curl
-    ! command -v gtar >/dev/null 2>&1 && brew install gnu-tar
-    ! command -v sha256sum >/dev/null 2>&1 && brew install coreutils
-}
-
-kkfly::install::run() {
-    local platform='debian'
-    command -v yum >/dev/null && platform='centos'
-    command -v dnf >/dev/null && platform='centos'
-    command -v brew >/dev/null && platform='mac'
-    eval "${FUNCNAME/::run/::${platform}}"
-}
-
-kkfly::install::centos() {
-    kkfly::install::install_deps_centos
-    kkfly::install::install
-}
-
-kkfly::install::debian() {
-    kkfly::install::install_deps_debian
-    kkfly::install::install
-}
-
-kkfly::install::mac() {
-    kkfly::install::install_deps_mac
-    kkfly::install::install
-}
-
 kkfly::install::install() {
     echo "Installing kkfly..."
     kkfly::install::need_cmd tar
     kkfly::install::need_cmd awk
-    kkfly::install::need_cmd install
+    (command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1) || kkfly::install::die "Missing required command: curl or wget"
 
     read -r OS ARCH < <(kkfly::install::detect_platform)
     [[ "${OS}" != "windows" ]] || kkfly::install::die "Windows install via this script is not supported. Please download the release asset manually."
@@ -360,4 +292,4 @@ kkfly::install::install() {
 }
 
 kkfly::install::parse_args "$@"
-kkfly::install::run "$@"
+kkfly::install::install
