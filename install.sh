@@ -147,6 +147,9 @@ kkfly::install::install_to_bindir() {
   local src="$1"
   local dest="$2"
 
+  # Always overwrite (replace) existing binary.
+  rm -f "${dest}" 2>/dev/null || true
+
   if command -v install >/dev/null 2>&1; then
     install -m 0755 "${src}" "${dest}" 2>/dev/null && return 0
   else
@@ -157,7 +160,7 @@ kkfly::install::install_to_bindir() {
     kkfly::install::die "Permission denied installing to ${dest} (run as root, or use sudo)"
   fi
 
-  sudo -n bash -c "mkdir -p \"$(dirname "${dest}")\" && (command -v install >/dev/null 2>&1 && install -m 0755 \"${src}\" \"${dest}\" || (cp \"${src}\" \"${dest}\" && chmod 0755 \"${dest}\"))" \
+  sudo -n bash -c "rm -f \"${dest}\" && mkdir -p \"$(dirname "${dest}")\" && (command -v install >/dev/null 2>&1 && install -m 0755 \"${src}\" \"${dest}\" || (cp \"${src}\" \"${dest}\" && chmod 0755 \"${dest}\"))" \
     || kkfly::install::die "sudo failed installing to ${dest} (ensure NOPASSWD or run as root)"
 }
 
@@ -207,13 +210,23 @@ kkfly::install::common() {
   extracted_path="${tmpdir}/${entry_path}"
   [[ -f "${extracted_path}" ]] || kkfly::install::die "Extracted binary not found"
 
-  kkfly::install::install_to_bindir "${extracted_path}" "${KKFLY_BIN_DIR}/kkfly"
+  # Overwrite install target:
+  # - If kkfly already exists in PATH and bin dir is default, replace that exact path.
+  # - Otherwise install to ${KKFLY_BIN_DIR}/kkfly.
+  local existing_path dest_path
+  existing_path="$(command -v kkfly 2>/dev/null || true)"
+  dest_path="${KKFLY_BIN_DIR}/kkfly"
+  if [[ -n "${existing_path}" && "${KKFLY_BIN_DIR}" == "/usr/local/bin" ]]; then
+    dest_path="${existing_path}"
+  fi
 
-  if [[ -x "${KKFLY_BIN_DIR}/kkfly" ]]; then
-    echo "Installed: ${KKFLY_BIN_DIR}/kkfly"
-    "${KKFLY_BIN_DIR}/kkfly" --version 2>/dev/null || true
+  kkfly::install::install_to_bindir "${extracted_path}" "${dest_path}"
+
+  if [[ -x "${dest_path}" ]]; then
+    echo "Installed: ${dest_path}"
+    "${dest_path}" --version 2>/dev/null || true
   else
-    kkfly::install::die "Install verification failed: ${KKFLY_BIN_DIR}/kkfly"
+    kkfly::install::die "Install verification failed: ${dest_path}"
   fi
 }
 
