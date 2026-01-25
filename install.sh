@@ -1,219 +1,407 @@
-#!/bin/sh
-# This installer is a tiny POSIX-sh wrapper that execs Ruby.
-# Ruby will start reading the script from the `#!ruby` marker via `-x`.
-exec ruby -x "$0" "$@"
-#!ruby
-# frozen_string_literal: true
+#!/usr/bin/env bash
 
-require "digest"
-require "fileutils"
-require "json"
-require "net/http"
-require "optparse"
-require "rbconfig"
-require "rubygems/package"
-require "tmpdir"
-require "uri"
-require "zlib"
+# Copyright (c) 2025 kk
+#
+# This software is released under the MIT License.
+# https://opensource.org/licenses/MIT
 
-class Installer
-  DEFAULT_REPO = "kevin197011/kkfly"
+set -o errexit
+set -o nounset
+set -o pipefail
 
-  def initialize(argv)
-    @repo = DEFAULT_REPO
-    @version = nil
-    @bin_dir = "/usr/local/bin"
-    @verbose = false
+# curl exec:
+# curl -fsSL https://raw.githubusercontent.com/kevin197011/kkfly/main/install.sh | bash
 
-    OptionParser.new do |o|
-      o.banner = "Usage: install.sh [options]"
-      o.on("--repo REPO", "GitHub repo, e.g. owner/name (default: #{DEFAULT_REPO})") { |v| @repo = v }
-      o.on("--version VERSION", "Release version/tag (default: latest). Accepts 1.2.3 or v1.2.3.") { |v| @version = v }
-      o.on("--bin-dir DIR", "Install directory (default: #{@bin_dir})") { |v| @bin_dir = v }
-      o.on("--verbose", "Verbose output") { @verbose = true }
-    end.parse!(argv)
-  end
+# vars
+KKFLY_REPO="${KKFLY_REPO:-kevin197011/kkfly}"
+KKFLY_VERSION="${KKFLY_VERSION:-}"
+KKFLY_BIN_DIR="${KKFLY_BIN_DIR:-/usr/local/bin}"
+KKFLY_VERBOSE="${KKFLY_VERBOSE:-0}"
 
-  def run
-    os, arch = detect_platform
-    if os == "windows"
-      abort "Windows install via this script is not supported. Please download the release asset manually."
-    end
+kkfly::install::usage() {
+    cat <<'EOF'
+Usage: install.sh [options]
 
-    release = fetch_release
-    version_for_asset = release.fetch("tag_name").sub(/\Av/, "")
-    asset_name = "kkfly_#{version_for_asset}_#{os}_#{arch}.tar.gz"
-    asset = release.fetch("assets").find { |a| a["name"] == asset_name }
-    abort "No asset found for #{os}/#{arch}: #{asset_name}" unless asset
+Options:
+  --repo REPO        GitHub repo, e.g. owner/name (default: kevin197011/kkfly) (env: KKFLY_REPO)
+  --version VERSION  Release version/tag (default: latest). Accepts 1.2.3 or v1.2.3. (env: KKFLY_VERSION)
+  --bin-dir DIR      Install directory (default: /usr/local/bin) (env: KKFLY_BIN_DIR)
+  --verbose          Verbose output
+  -h, --help         Show this help
+EOF
+}
 
-    checksums_asset = release.fetch("assets").find { |a| a["name"] == "checksums.txt" }
-    abort "Missing checksums.txt in release assets" unless checksums_asset
+kkfly::install::log() {
+    [[ "${KKFLY_VERBOSE}" == "1" ]] && echo "$@" >&2
+}
 
-    Dir.mktmpdir("kkfly-install") do |dir|
-      archive_path = File.join(dir, asset_name)
-      checksums_path = File.join(dir, "checksums.txt")
+kkfly::install::die() {
+    echo "Error: $*" >&2
+    exit 1
+}
 
-      download(asset["browser_download_url"], archive_path)
-      download(checksums_asset["browser_download_url"], checksums_path)
+kkfly::install::need_cmd() {
+    command -v "$1" >/dev/null 2>&1 || kkfly::install::die "Missing required command: $1"
+}
 
-      verify_checksum!(archive_path, checksums_path)
+kkfly::install::detect_platform() {
+    local os arch uos uarch
+    uos="$(uname -s 2>/dev/null || true)"
+    uarch="$(uname -m 2>/dev/null || true)"
 
-      extracted_bin = extract_tar_gz_binary!(archive_path, dir, "kkfly")
-      install_binary!(extracted_bin, File.join(@bin_dir, "kkfly"))
-    end
+    case "${uos}" in
+        Darwin) os="darwin" ;;
+        Linux) os="linux" ;;
+        MINGW* | MSYS* | CYGWIN* | Windows_NT) os="windows" ;;
+        *) kkfly::install::die "Unsupported OS: ${uos}" ;;
+    esac
 
-    puts "Installed kkfly to #{@bin_dir}/kkfly"
-  end
+    case "${uarch}" in
+        x86_64 | amd64) arch="amd64" ;;
+        arm64 | aarch64) arch="arm64" ;;
+        *) kkfly::install::die "Unsupported CPU arch: ${uarch}" ;;
+    esac
 
-  private
+    echo "${os} ${arch}"
+}
 
-  def detect_platform
-    host_os = RbConfig::CONFIG["host_os"]
-    host_cpu = RbConfig::CONFIG["host_cpu"]
+kkfly::install::json_tag_name() {
+    if command -v jq >/dev/null 2>&1; then
+        jq -r '.tag_name // empty'
+        return 0
+    fi
+    if command -v python3 >/dev/null 2>&1; then
+        python3 - <<'PY'
+import json, sys
+data = json.load(sys.stdin)
+print(data.get("tag_name", ""))
+PY
+        return 0
+    fi
+    if command -v python >/dev/null 2>&1; then
+        python - <<'PY'
+import json, sys
+data = json.load(sys.stdin)
+print(data.get("tag_name", ""))
+PY
+        return 0
+    fi
+    kkfly::install::die "Need jq or python3 to parse GitHub API JSON"
+}
 
-    os =
-      case host_os
-      when /darwin/ then "darwin"
-      when /linux/ then "linux"
-      when /mswin|mingw|cygwin/ then "windows"
-      else
-        abort "Unsupported OS: #{host_os}"
-      end
+kkfly::install::json_asset_url_by_name() {
+    local asset_name="$1"
+    if command -v jq >/dev/null 2>&1; then
+        jq -r --arg name "${asset_name}" '.assets[]? | select(.name == $name) | .browser_download_url // empty' | head -n1
+        return 0
+    fi
+    if command -v python3 >/dev/null 2>&1; then
+        python3 - "${asset_name}" <<'PY'
+import json, sys
+name = sys.argv[1]
+data = json.load(sys.stdin)
+for a in data.get("assets", []) or []:
+  if a.get("name") == name:
+    print(a.get("browser_download_url", ""))
+    break
+PY
+        return 0
+    fi
+    if command -v python >/dev/null 2>&1; then
+        python - "${asset_name}" <<'PY'
+import json, sys
+name = sys.argv[1]
+data = json.load(sys.stdin)
+for a in data.get("assets", []) or []:
+  if a.get("name") == name:
+    print(a.get("browser_download_url", ""))
+    break
+PY
+        return 0
+    fi
+    kkfly::install::die "Need jq or python3 to parse GitHub API JSON"
+}
 
-    arch =
-      case host_cpu
-      when /x86_64|amd64/ then "amd64"
-      when /aarch64|arm64/ then "arm64"
-      else
-        abort "Unsupported CPU arch: #{host_cpu}"
-      end
+kkfly::install::download_cmd() {
+    if command -v curl >/dev/null 2>&1; then
+        echo "curl -fsSL --retry 3 --retry-delay 1 -L"
+        return 0
+    fi
+    if command -v wget >/dev/null 2>&1; then
+        echo "wget -qO-"
+        return 0
+    fi
+    return 1
+}
 
-    [os, arch]
-  end
+kkfly::install::github_api_get() {
+    local url="$1"
+    local cmd
+    cmd="$(kkfly::install::download_cmd)" || kkfly::install::die "Error: curl or wget is required"
+    # GitHub API requires headers; wget cannot set these easily in a portable way.
+    if [[ "${cmd}" == curl* ]]; then
+        curl -fsSL --retry 3 --retry-delay 1 -L \
+            -H "User-Agent: kkfly-installer" \
+            -H "Accept: application/vnd.github+json" \
+            "${url}"
+        return 0
+    fi
+    kkfly::install::die "Error: curl is required for GitHub API requests"
+}
 
-  def fetch_release
-    if @version.nil? || @version.strip.empty?
-      url = "https://api.github.com/repos/#{@repo}/releases/latest"
+kkfly::install::download_file() {
+    local url="$1"
+    local dest="$2"
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL --retry 3 --retry-delay 1 -L -o "${dest}" \
+            -H "User-Agent: kkfly-installer" \
+            -H "Accept: application/octet-stream" \
+            "${url}"
+        kkfly::install::log "Downloaded $(basename "${dest}")"
+        return 0
+    fi
+    if command -v wget >/dev/null 2>&1; then
+        wget -qO "${dest}" "${url}"
+        kkfly::install::log "Downloaded $(basename "${dest}")"
+        return 0
+    fi
+    kkfly::install::die "Error: curl or wget is required"
+}
+
+kkfly::install::sha256_file() {
+    local file="$1"
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "${file}" | awk '{print $1}'
+        return 0
+    fi
+    if command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "${file}" | awk '{print $1}'
+        return 0
+    fi
+    if command -v openssl >/dev/null 2>&1; then
+        openssl dgst -sha256 "${file}" | awk '{print $NF}'
+        return 0
+    fi
+    kkfly::install::die "Missing sha256 tool (need sha256sum or shasum or openssl)"
+}
+
+kkfly::install::verify_checksum() {
+    local archive_path="$1"
+    local checksums_path="$2"
+    local asset_name expected actual
+    asset_name="$(basename "${archive_path}")"
+
+    expected="$(
+        awk -v name="${asset_name}" '
+          NF >= 2 {
+            f = $2
+            sub(/^\*/, "", f)
+            if (f == name) { print $1; exit }
+          }
+        ' "${checksums_path}"
+    )"
+    [[ -n "${expected}" ]] || kkfly::install::die "checksums.txt does not contain ${asset_name}"
+
+    actual="$(kkfly::install::sha256_file "${archive_path}")"
+    [[ "${expected}" == "${actual}" ]] || kkfly::install::die "Checksum mismatch for ${asset_name}"
+}
+
+kkfly::install::extract_tar_gz_binary() {
+    local archive_path="$1"
+    local work_dir="$2"
+    local binary_name="$3"
+    local list_path extracted_path
+
+    # Find the first file path in the archive whose basename matches binary_name.
+    list_path="$(
+        tar -tzf "${archive_path}" \
+            | awk -v b="${binary_name}" '{
+                n = $0
+                sub(/.*\//, "", n)
+                if (n == b) { print $0; exit }
+              }'
+    )"
+    [[ -n "${list_path}" ]] || kkfly::install::die "Binary ${binary_name} not found in archive"
+
+    tar -xzf "${archive_path}" -C "${work_dir}" "${list_path}"
+    extracted_path="${work_dir}/${list_path}"
+    [[ -f "${extracted_path}" ]] || kkfly::install::die "Extracted binary not found: ${extracted_path}"
+    chmod 0755 "${extracted_path}" || true
+    echo "${extracted_path}"
+}
+
+kkfly::install::install_binary() {
+    local src="$1"
+    local dest="$2"
+
+    mkdir -p "$(dirname "${dest}")"
+
+    if install -m 0755 "${src}" "${dest}" 2>/dev/null; then
+        return 0
+    fi
+
+    if ! command -v sudo >/dev/null 2>&1; then
+        kkfly::install::die "Permission denied installing to ${dest} (try --bin-dir)"
+    fi
+
+    # Non-interactive sudo; fails fast if password is required.
+    sudo -n install -m 0755 "${src}" "${dest}" \
+        || kkfly::install::die "sudo failed installing to ${dest} (ensure NOPASSWD or use --bin-dir)"
+}
+
+kkfly::install::parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --repo)
+                [[ $# -ge 2 ]] || kkfly::install::die "--repo requires a value"
+                KKFLY_REPO="$2"
+                shift 2
+                ;;
+            --version)
+                [[ $# -ge 2 ]] || kkfly::install::die "--version requires a value"
+                KKFLY_VERSION="$2"
+                shift 2
+                ;;
+            --bin-dir)
+                [[ $# -ge 2 ]] || kkfly::install::die "--bin-dir requires a value"
+                KKFLY_BIN_DIR="$2"
+                shift 2
+                ;;
+            --verbose)
+                KKFLY_VERBOSE="1"
+                shift
+                ;;
+            -h | --help)
+                kkfly::install::usage
+                exit 0
+                ;;
+            *)
+                kkfly::install::die "Unknown argument: $1 (use --help)"
+                ;;
+        esac
+    done
+}
+
+kkfly::install::install_deps_centos() {
+    if command -v python3 >/dev/null 2>&1 && command -v curl >/dev/null 2>&1 && command -v tar >/dev/null 2>&1; then
+        return 0
+    fi
+    echo "Installing dependencies..."
+    if command -v dnf >/dev/null 2>&1; then
+        ! command -v python3 >/dev/null 2>&1 && sudo dnf install -y python3
+        ! command -v curl >/dev/null 2>&1 && sudo dnf install -y curl
+        ! command -v tar >/dev/null 2>&1 && sudo dnf install -y tar
+        ! command -v awk >/dev/null 2>&1 && sudo dnf install -y gawk
+        ! command -v install >/dev/null 2>&1 && sudo dnf install -y coreutils
+        ! command -v sha256sum >/dev/null 2>&1 && sudo dnf install -y coreutils
     else
-      tag = @version.strip
-      tag = "v#{tag}" unless tag.start_with?("v")
-      url = "https://api.github.com/repos/#{@repo}/releases/tags/#{tag}"
-    end
+        ! command -v python3 >/dev/null 2>&1 && sudo yum install -y python3
+        ! command -v curl >/dev/null 2>&1 && sudo yum install -y curl
+        ! command -v tar >/dev/null 2>&1 && sudo yum install -y tar
+        ! command -v awk >/dev/null 2>&1 && sudo yum install -y gawk
+        ! command -v install >/dev/null 2>&1 && sudo yum install -y coreutils
+        ! command -v sha256sum >/dev/null 2>&1 && sudo yum install -y coreutils
+    fi
+}
 
-    json_get(url)
-  end
+kkfly::install::install_deps_debian() {
+    if command -v python3 >/dev/null 2>&1 && command -v curl >/dev/null 2>&1 && command -v tar >/dev/null 2>&1; then
+        return 0
+    fi
+    echo "Installing dependencies..."
+    sudo apt-get update -qq
+    ! command -v python3 >/dev/null 2>&1 && sudo apt-get install -y python3
+    ! command -v curl >/dev/null 2>&1 && sudo apt-get install -y curl
+    ! command -v tar >/dev/null 2>&1 && sudo apt-get install -y tar
+    ! command -v awk >/dev/null 2>&1 && sudo apt-get install -y gawk
+    ! command -v install >/dev/null 2>&1 && sudo apt-get install -y coreutils
+    ! command -v sha256sum >/dev/null 2>&1 && sudo apt-get install -y coreutils
+}
 
-  def json_get(url)
-    uri = URI(url)
-    req = Net::HTTP::Get.new(uri)
-    req["User-Agent"] = "kkfly-installer"
-    req["Accept"] = "application/vnd.github+json"
+kkfly::install::install_deps_mac() {
+    if command -v python3 >/dev/null 2>&1 && command -v curl >/dev/null 2>&1 && command -v tar >/dev/null 2>&1; then
+        return 0
+    fi
+    echo "Installing dependencies..."
+    if ! command -v brew >/dev/null 2>&1; then
+        echo "Installing Homebrew..."
+        /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+    fi
+    ! command -v python3 >/dev/null 2>&1 && brew install python3
+    ! command -v curl >/dev/null 2>&1 && brew install curl
+    ! command -v gtar >/dev/null 2>&1 && brew install gnu-tar
+    ! command -v sha256sum >/dev/null 2>&1 && brew install coreutils
+}
 
-    res = http_request(uri, req)
-    unless res.is_a?(Net::HTTPSuccess)
-      abort "GitHub API request failed: #{res.code} #{res.message}\n#{res.body}"
-    end
-    JSON.parse(res.body)
-  end
+kkfly::install::run() {
+    local platform='debian'
+    command -v yum >/dev/null && platform='centos'
+    command -v dnf >/dev/null && platform='centos'
+    command -v brew >/dev/null && platform='mac'
+    eval "${FUNCNAME/::run/::${platform}}"
+}
 
-  def download(url, dest_path)
-    uri = URI(url)
-    req = Net::HTTP::Get.new(uri)
-    req["User-Agent"] = "kkfly-installer"
-    req["Accept"] = "application/octet-stream"
+kkfly::install::centos() {
+    kkfly::install::install_deps_centos
+    kkfly::install::install
+}
 
-    res = http_request(uri, req)
-    unless res.is_a?(Net::HTTPSuccess)
-      abort "Download failed: #{res.code} #{res.message} (#{url})"
-    end
+kkfly::install::debian() {
+    kkfly::install::install_deps_debian
+    kkfly::install::install
+}
 
-    File.open(dest_path, "wb") { |f| f.write(res.body) }
-    puts "Downloaded #{File.basename(dest_path)}" if @verbose
-  end
+kkfly::install::mac() {
+    kkfly::install::install_deps_mac
+    kkfly::install::install
+}
 
-  def http_request(uri, req, limit = 5)
-    abort "Too many redirects" if limit <= 0
+kkfly::install::install() {
+    kkfly::install::need_cmd tar
+    kkfly::install::need_cmd awk
+    kkfly::install::need_cmd install
 
-    Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == "https") do |http|
-      res = http.request(req)
-      case res
-      when Net::HTTPRedirection
-        next_uri = URI(res["location"])
-        next_req = Net::HTTP::Get.new(next_uri)
-        next_req["User-Agent"] = req["User-Agent"]
-        next_req["Accept"] = req["Accept"]
-        return http_request(next_uri, next_req, limit - 1)
-      else
-        return res
-      end
-    end
-  end
+    read -r OS ARCH < <(kkfly::install::detect_platform)
+    [[ "${OS}" != "windows" ]] || kkfly::install::die "Windows install via this script is not supported. Please download the release asset manually."
 
-  def verify_checksum!(archive_path, checksums_path)
-    asset_name = File.basename(archive_path)
-    expected = nil
-    File.readlines(checksums_path, chomp: true).each do |line|
-      next if line.strip.empty?
-      sha, name = line.split(/\s+/, 2)
-      next unless name
-      name = name.strip
-      if name == asset_name
-        expected = sha
-        break
-      end
-    end
-    abort "checksums.txt does not contain #{asset_name}" unless expected
+    local release_url tag release_json tag_name version_for_asset asset_name asset_url checksums_url
+    if [[ -z "${KKFLY_VERSION}" ]]; then
+        release_url="https://api.github.com/repos/${KKFLY_REPO}/releases/latest"
+    else
+        tag="${KKFLY_VERSION}"
+        [[ "${tag}" == v* ]] || tag="v${tag}"
+        release_url="https://api.github.com/repos/${KKFLY_REPO}/releases/tags/${tag}"
+    fi
 
-    actual = Digest::SHA256.file(archive_path).hexdigest
-    abort "Checksum mismatch for #{asset_name}" unless secure_eq(expected, actual)
-  end
+    release_json="$(kkfly::install::github_api_get "${release_url}")"
+    tag_name="$(printf '%s' "${release_json}" | kkfly::install::json_tag_name)"
+    [[ -n "${tag_name}" ]] || kkfly::install::die "Unable to read tag_name from GitHub API response"
+    version_for_asset="${tag_name#v}"
 
-  def secure_eq(a, b)
-    return false unless a.bytesize == b.bytesize
-    acc = 0
-    a.bytes.zip(b.bytes).each { |x, y| acc |= (x ^ y) }
-    acc.zero?
-  end
+    asset_name="kkfly_${version_for_asset}_${OS}_${ARCH}.tar.gz"
+    asset_url="$(printf '%s' "${release_json}" | kkfly::install::json_asset_url_by_name "${asset_name}")"
+    [[ -n "${asset_url}" ]] || kkfly::install::die "No asset found for ${OS}/${ARCH}: ${asset_name}"
 
-  def extract_tar_gz_binary!(archive_path, work_dir, binary_name)
-    out_path = File.join(work_dir, binary_name)
-    found = false
+    checksums_url="$(printf '%s' "${release_json}" | kkfly::install::json_asset_url_by_name "checksums.txt")"
+    [[ -n "${checksums_url}" ]] || kkfly::install::die "Missing checksums.txt in release assets"
 
-    Zlib::GzipReader.open(archive_path) do |gz|
-      Gem::Package::TarReader.new(gz) do |tar|
-        tar.each do |entry|
-          next unless entry.file?
-          next unless File.basename(entry.full_name) == binary_name
-          File.open(out_path, "wb") { |f| f.write(entry.read) }
-          FileUtils.chmod(0o755, out_path)
-          found = true
-          break
-        end
-      end
-    end
+    local tmpdir archive_path checksums_path extracted_bin
+    tmpdir="$(mktemp -d -t kkfly-install.XXXXXX)"
+    trap 'rm -rf "${tmpdir}"' EXIT
 
-    abort "Binary #{binary_name} not found in archive" unless found
-    out_path
-  end
+    archive_path="${tmpdir}/${asset_name}"
+    checksums_path="${tmpdir}/checksums.txt"
 
-  def install_binary!(src, dest)
-    FileUtils.mkdir_p(File.dirname(dest))
-    begin
-      FileUtils.cp(src, dest)
-      FileUtils.chmod(0o755, dest)
-      return
-    rescue Errno::EACCES
-      # fall through to sudo
-    end
+    kkfly::install::download_file "${asset_url}" "${archive_path}"
+    kkfly::install::download_file "${checksums_url}" "${checksums_path}"
 
-    sudo = `command -v sudo 2>/dev/null`.strip
-    abort "Permission denied installing to #{dest} (try --bin-dir)" if sudo.empty?
+    kkfly::install::verify_checksum "${archive_path}" "${checksums_path}"
 
-    # Non-interactive sudo; will fail fast if password is required.
-    ok = system("sudo", "-n", "install", "-m", "0755", src, dest)
-    abort "sudo failed installing to #{dest} (ensure NOPASSWD or use --bin-dir)" unless ok
-  end
-end
+    extracted_bin="$(kkfly::install::extract_tar_gz_binary "${archive_path}" "${tmpdir}" "kkfly")"
+    kkfly::install::install_binary "${extracted_bin}" "${KKFLY_BIN_DIR}/kkfly"
 
-Installer.new(ARGV).run
+    echo "Installed kkfly to ${KKFLY_BIN_DIR}/kkfly"
+}
 
+kkfly::install::parse_args "$@"
+kkfly::install::run "$@"
