@@ -225,6 +225,12 @@ func parsePrivateKeyBytes(b []byte) (ssh.Signer, error) {
 }
 
 func buildHostKeyCallback(cfg ExecConfig) (ssh.HostKeyCallback, error) {
+	// If strict host key checking is disabled, skip known_hosts verification entirely.
+	// This is equivalent to OpenSSH "StrictHostKeyChecking=no".
+	if !cfg.StrictHostKeyChecking {
+		return ssh.InsecureIgnoreHostKey(), nil
+	}
+
 	khPath := strings.TrimSpace(cfg.KnownHostsPath)
 	if khPath == "" {
 		// Prefer user's default known_hosts if present.
@@ -247,17 +253,7 @@ func buildHostKeyCallback(cfg ExecConfig) (ssh.HostKeyCallback, error) {
 		}, nil
 	}
 
-	if cfg.StrictHostKeyChecking {
-		return nil, errors.New("strict_host_key_checking is enabled but no known_hosts file was found or configured")
-	}
-
-	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
-		// SECURITY: insecure fallback (explicitly allowed only when strict checking is disabled).
-		_ = hostname
-		_ = remote
-		_ = key
-		return nil
-	}, nil
+	return nil, errors.New("strict_host_key_checking is enabled but no known_hosts file was found or configured")
 }
 
 // SingleQuoteForBash returns a string wrapped for safe usage as a single bash argument.
