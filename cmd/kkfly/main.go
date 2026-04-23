@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"runtime/debug"
 	"strings"
 
@@ -72,6 +74,56 @@ func versionString() string {
 	return strings.Join(parts, " ")
 }
 
+const defaultConfigTemplate = `user: ubuntu
+private_key_path: ~/.ssh/id_ed25519
+# private_key_content: |
+#   -----BEGIN RSA PRIVATE KEY-----
+#   ...
+
+port: 22
+concurrency: 20
+
+# Optional: run via sudo (non-interactive). Requires NOPASSWD on remote host.
+sudo: true
+
+# Optional: timeouts and output limits
+connect_timeout_seconds: 10
+command_timeout_seconds: 900
+max_output_bytes_per_stream: 262144
+
+# Optional: SSH host key verification
+# known_hosts_path: ~/.ssh/known_hosts
+# strict_host_key_checking: true
+
+# Required: remote command to run
+command: |
+  curl -fsSL https://raw.githubusercontent.com/kevin197011/krun/main/lib/hello-world.sh | bash
+
+hosts:
+  - 1.2.3.4
+  - example.com
+`
+
+func ensureConfigFile(path string) (bool, error) {
+	if _, err := os.Stat(path); err == nil {
+		return false, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
+
+	// Auto-generate initial config in current working directory.
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		absPath = path
+	}
+	if err := os.WriteFile(path, []byte(defaultConfigTemplate), 0o644); err != nil {
+		return false, err
+	}
+	fmt.Printf("No config file found. Generated template: %s\n", absPath)
+	fmt.Println("Please edit the file and run kkfly again.")
+	return true, nil
+}
+
 func main() {
 	var configPath string
 	var jsonMode bool
@@ -86,6 +138,15 @@ func main() {
 
 	if showVersion {
 		fmt.Println(versionString())
+		return
+	}
+
+	created, err := ensureConfigFile(configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: failed to prepare config file: %v\n", err)
+		os.Exit(1)
+	}
+	if created {
 		return
 	}
 
