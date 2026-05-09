@@ -14,19 +14,27 @@ readonly BINARY_NAME="kkfly"
 readonly INSTALL_DIR="/usr/local/bin"
 readonly INSTALL_PATH="${INSTALL_DIR}/${BINARY_NAME}"
 
+kkfly::install::detect_platform() {
+    if command -v brew >/dev/null 2>&1; then
+        echo "mac"
+    elif command -v yum >/dev/null 2>&1 || command -v dnf >/dev/null 2>&1; then
+        echo "centos"
+    else
+        echo "debian"
+    fi
+}
+
 # --- run code ---
 kkfly::install::run() {
-    local platform='debian'
-    command -v yum >/dev/null && platform='centos'
-    command -v dnf >/dev/null && platform='centos'
-    command -v brew >/dev/null && platform='mac'
+    local platform
+    platform="$(kkfly::install::detect_platform)"
     
     if [[ "${platform}" != "mac" && "$EUID" -ne 0 ]]; then
         echo "❌ Error: Please run as root (use sudo)"
         exit 1
     fi
 
-    eval "kkfly::install::${platform}" "$@"
+    "kkfly::install::${platform}" "$@"
 }
 
 kkfly::install::centos() { kkfly::install::common; }
@@ -38,9 +46,6 @@ kkfly::install::common() {
     local tmp_dir
     tmp_dir=$(mktemp -d -t kkfly_XXXXXX)
 
-    # 【彻底修复点】：
-    # 1. 使用 ${tmp_dir:-} 语法，如果变量未定义则返回空字符串，绕过 nounset
-    # 2. 只有在变量不为空时才执行 rm，增加安全性
     trap '[[ -n "${tmp_dir:-}" ]] && rm -rf "${tmp_dir}"' EXIT
     
     cd "${tmp_dir}"
@@ -76,9 +81,13 @@ kkfly::install::common() {
     tar -zxf "${filename}"
 
     local target
-    target=$(find . -type f -name "${BINARY_NAME}" -perm -u+x | head -n 1)
+    target="./${BINARY_NAME}"
+    if [[ ! -f "${target}" || ! -x "${target}" ]]; then
+        target="$(tar -tzf "${filename}" | awk -v name="${BINARY_NAME}" -F/ '$NF == name { print; exit }')"
+        target="./${target}"
+    fi
 
-    if [[ -z "${target}" ]]; then
+    if [[ ! -f "${target}" || ! -x "${target}" ]]; then
         echo "❌ Error: Binary ${BINARY_NAME} not found"
         exit 1
     fi
