@@ -6,7 +6,7 @@ Concurrent SSH remote command runner — run the same shell command on many host
 
 ```bash
 # 1. Install
-curl -fsSL https://raw.githubusercontent.com/kevin197011/kkfly/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/kevin197011/kkfly/main/install.py | python3
 
 # 2. First run generates kkfly.yml — edit hosts + command, then:
 kkfly
@@ -21,15 +21,15 @@ jq -e '.overall == "success"' kkfly.json
 **Latest release** (Linux / macOS, `amd64` / `arm64`):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/kevin197011/kkfly/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/kevin197011/kkfly/main/install.py | python3
 ```
 
 **Pin version or install path:**
 
 ```bash
-VERSION=0.1.13 curl -fsSL https://raw.githubusercontent.com/kevin197011/kkfly/main/install.sh | bash
-curl -fsSL https://raw.githubusercontent.com/kevin197011/kkfly/main/install.sh | bash -s -- -v 0.1.13
-INSTALL_DIR=~/.local/bin curl -fsSL https://raw.githubusercontent.com/kevin197011/kkfly/main/install.sh | bash
+VERSION=0.1.13 curl -fsSL https://raw.githubusercontent.com/kevin197011/kkfly/main/install.py | python3
+curl -fsSL https://raw.githubusercontent.com/kevin197011/kkfly/main/install.py | python3 - --version 0.1.13
+INSTALL_DIR=~/.local/bin curl -fsSL https://raw.githubusercontent.com/kevin197011/kkfly/main/install.py | python3
 ```
 
 | Platform | Install path | Notes |
@@ -37,7 +37,7 @@ INSTALL_DIR=~/.local/bin curl -fsSL https://raw.githubusercontent.com/kevin19701
 | Linux | `/usr/local/bin` | Use `sudo` when the directory is not writable |
 | macOS | `/usr/local/bin` or `~/.local/bin` | Falls back to `~/.local/bin` without root |
 
-Artifacts are verified against the release **`checksums.txt`** (SHA-256).  
+Artifacts are verified against the release **`checksums.txt`** (SHA-256). Requires **Python 3.8+** (stdlib only).  
 Releases: [github.com/kevin197011/kkfly/releases](https://github.com/kevin197011/kkfly/releases)
 
 ## Usage
