@@ -20,6 +20,11 @@ readonly BINARY="kkfly"
 install_dir="${INSTALL_DIR:-/usr/local/bin}"
 install_path=""
 version="${VERSION:-}"
+tmp=""
+
+cleanup() {
+	[[ -n "$tmp" && -d "$tmp" ]] && rm -rf "$tmp"
+}
 
 usage() {
 	cat <<EOF
@@ -140,7 +145,7 @@ main() {
 	need_cmd tar
 	need_cmd install
 
-	local os arch archive url tmp bin
+	local os arch archive url bin
 	os=$(detect_os)
 	arch=$(detect_arch)
 	ensure_install_dir
@@ -156,7 +161,7 @@ main() {
 	url="https://github.com/${REPO}/releases/download/v${version}/${archive}"
 
 	tmp=$(mktemp -d)
-	trap 'rm -rf "$tmp"' EXIT
+	trap cleanup EXIT
 
 	info "downloading v${version} (${os}/${arch})"
 	curl -fsSL "$url" -o "${tmp}/${archive}"
