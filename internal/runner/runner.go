@@ -3,14 +3,12 @@ package runner
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"os"
 	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
-	"text/tabwriter"
 	"time"
 
 	"github.com/kevin197011/kkfly/internal/config"
@@ -142,53 +140,6 @@ func coloredField(code, s string, width int) string {
 	return code + s + ansiReset + strings.Repeat(" ", pad)
 }
 
-// hostColumnWidth picks a HOST column width for aligned stream output.
-func hostColumnWidth(hosts []string) int {
-	const minW = 16
-	const maxW = 52
-	w := len("HOST")
-	for _, h := range hosts {
-		if n := len(h); n > w {
-			w = n
-		}
-	}
-	switch {
-	case w < minW:
-		return minW
-	case w > maxW:
-		return maxW
-	default:
-		return w
-	}
-}
-
-// summarizeCommand collapses whitespace for RUN header previews.
-func summarizeCommand(cmd string, maxRunes int) string {
-	cmd = strings.TrimSpace(cmd)
-	if cmd == "" {
-		return ""
-	}
-
-	nonEmptyLines := 0
-	for _, line := range strings.Split(cmd, "\n") {
-		if strings.TrimSpace(line) != "" {
-			nonEmptyLines++
-		}
-	}
-	oneLine := strings.Join(strings.Fields(cmd), " ")
-	if nonEmptyLines > 1 {
-		if maxRunes > 0 && len(oneLine) > maxRunes {
-			return fmt.Sprintf("%s (multi-line command; %d lines)", oneLine[:maxRunes]+"...", nonEmptyLines)
-		}
-		return fmt.Sprintf("%s (multi-line command; %d lines)", oneLine, nonEmptyLines)
-	}
-
-	if maxRunes > 0 && len(oneLine) > maxRunes {
-		return oneLine[:maxRunes] + "..."
-	}
-	return oneLine
-}
-
 // finalizeReport fills aggregate counters for summaries, JSON exports, and copy blocks.
 func finalizeReport(r *Report) {
 	r.HostsTotal = len(r.Results)
@@ -217,61 +168,6 @@ func finalizeReport(r *Report) {
 	}
 }
 
-func oneLineTSVCell(s string) string {
-	s = strings.ReplaceAll(s, "\r", " ")
-	s = strings.ReplaceAll(s, "\t", " ")
-	s = strings.ReplaceAll(s, "\n", " ")
-	return strings.TrimSpace(s)
-}
-
-// printCollectBlock emits a deterministic plain-text footer for scraping and dashboards.
-func printCollectBlock(out dualOut, r Report) {
-	wallSec := r.Finished.Sub(r.Started).Seconds()
-
-	var b strings.Builder
-	b.WriteString("\n<<< KKFLY_COLLECT (plain lines for logs/scripts)\n")
-	fmt.Fprintf(
-		&b,
-		"overall=%s hosts_total=%d hosts_ok=%d hosts_failed=%d duration=%s wall_seconds=%.3f\n",
-		r.Overall,
-		r.HostsTotal,
-		r.HostsOK,
-		r.HostsFailed,
-		r.Duration,
-		wallSec,
-	)
-	if len(r.FailedHosts) > 0 {
-		b.WriteString("failed_hosts_tsv=")
-		for i, h := range r.FailedHosts {
-			if i > 0 {
-				b.WriteByte('\t')
-			}
-			b.WriteString(oneLineTSVCell(h))
-		}
-		b.WriteByte('\n')
-	}
-	b.WriteString("--- RESULT_TSV_BEGIN\n")
-	b.WriteString("HOST\tSTATUS\tEXIT\tDURATION_MS\tERROR\n")
-	for _, res := range r.Results {
-		st := "OK"
-		if res.Status != StatusSucceeded {
-			st = "FAIL"
-		}
-		ms := res.Finished.Sub(res.Started).Milliseconds()
-		fmt.Fprintf(&b, "%s\t%s\t%d\t%d\t%s\n",
-			oneLineTSVCell(res.Host),
-			st,
-			res.ExitCode,
-			ms,
-			oneLineTSVCell(res.Error),
-		)
-	}
-	b.WriteString("--- RESULT_TSV_END\n")
-	b.WriteString(">>> END KKFLY_COLLECT\n")
-
-	out.write(b.String(), "")
-}
-
 func Run(ctx context.Context, cfg config.Config, opt Options) (Report, error) {
 	started := time.Now()
 
@@ -285,35 +181,7 @@ func Run(ctx context.Context, cfg config.Config, opt Options) (Report, error) {
 		color: supportsColor(termOut),
 	}
 
-	// Header (audit-friendly, easy to copy/paste)
-	{
-		strict := true
-		if cfg.StrictHostKeyChecking != nil {
-			strict = *cfg.StrictHostKeyChecking
-		}
-		plainHeader := fmt.Sprintf(
-			"KKFLY RUN  %s  hosts=%d  conc=%d  sudo=%t  strict_host_key=%t\n",
-			started.Format("2006-01-02 15:04:05"),
-			len(cfg.Hosts),
-			cfg.Concurrency,
-			cfg.Sudo,
-			strict,
-		)
-		coloredHeader := plainHeader
-		if ow.color {
-			coloredHeader = colorize(ansiBold+ansiCyan, "KKFLY RUN") + plainHeader[len("KKFLY RUN"):]
-		}
-		ow.write(plainHeader, coloredHeader)
-		if cmdPrev := summarizeCommand(cfg.Command, 180); cmdPrev != "" {
-			plain := fmt.Sprintf("CMD: %s\n", cmdPrev)
-			colored := plain
-			if ow.color {
-				colored = colorize(ansiDim, "CMD:") + plain[len("CMD:"):]
-			}
-			ow.write(plain, colored)
-		}
-		ow.write("\n", "\n")
-	}
+	printRunHeader(ow, cfg, started)
 
 	hostColW := hostColumnWidth(cfg.Hosts)
 	var finishedCounter atomic.Uint32
@@ -413,8 +281,8 @@ func runOne(ctx context.Context, cfg config.Config, host string, events chan<- E
 	})
 	if err != nil {
 		finished := time.Now()
-		dur := finished.Sub(hostStarted).Truncate(time.Millisecond)
-		events <- Event{At: finished, Host: host, Kind: "finished", Message: fmt.Sprintf("fail exit=-1 dur=%s err=%v", dur, err)}
+		dur := finished.Sub(hostStarted)
+		events <- Event{At: finished, Host: host, Kind: "finished", Message: formatFinishedMessage(-1, dur, err.Error())}
 		return HostResult{
 			Host:     host,
 			Status:   StatusFailed,
@@ -472,339 +340,36 @@ func runOne(ctx context.Context, cfg config.Config, host string, events chan<- E
 	if execErr != nil {
 		hr.Status = StatusFailed
 		hr.Error = execErr.Error()
-		dur := hr.Finished.Sub(hr.Started).Truncate(time.Millisecond)
-		events <- Event{At: time.Now(), Host: host, Kind: "finished", Message: fmt.Sprintf("fail exit=%d dur=%s err=%v", hr.ExitCode, dur, execErr)}
+		events <- Event{At: time.Now(), Host: host, Kind: "finished", Message: formatFinishedMessage(hr.ExitCode, hr.Finished.Sub(hr.Started), execErr.Error())}
 		return hr
 	}
 
 	if res.ExitCode == 0 {
 		hr.Status = StatusSucceeded
-		dur := hr.Finished.Sub(hr.Started).Truncate(time.Millisecond)
-		events <- Event{At: time.Now(), Host: host, Kind: "finished", Message: fmt.Sprintf("ok exit=0 dur=%s", dur)}
+		events <- Event{At: time.Now(), Host: host, Kind: "finished", Message: formatFinishedMessage(0, hr.Finished.Sub(hr.Started), "")}
 		return hr
 	}
 
 	hr.Status = StatusFailed
-	{
-		dur := hr.Finished.Sub(hr.Started).Truncate(time.Millisecond)
-		msg := fmt.Sprintf("fail exit=%d dur=%s", res.ExitCode, dur)
-		if hr.Error != "" {
-			msg += " err=" + hr.Error
-		}
-		events <- Event{At: time.Now(), Host: host, Kind: "finished", Message: msg}
-	}
+	events <- Event{At: time.Now(), Host: host, Kind: "finished", Message: formatFinishedMessage(res.ExitCode, hr.Finished.Sub(hr.Started), hr.Error)}
 	return hr
 }
 
-// splitBracketProgressPrefix splits an optional "[i/n] " prefix from DONE stream lines.
-func splitBracketProgressPrefix(s string) (prefix string, rest string) {
-	if !strings.HasPrefix(s, "[") {
-		return "", s
-	}
-	idx := strings.Index(s, "] ")
-	if idx < 0 {
-		return "", s
-	}
-	return s[:idx+2], s[idx+2:]
-}
-
-func stageColor(stage, message string) string {
-	switch stage {
-	case "QUEUED":
-		return ansiDim
-	case "CONNECT":
-		return ansiYellow
-	case "RUN":
-		return ansiCyan
-	case "OUT":
-		return ansiGreen
-	case "ERR":
-		return ansiRed
-	case "DONE":
-		if strings.HasPrefix(message, "ok ") || strings.HasPrefix(message, "ok") {
-			return ansiGreen
-		}
-		if strings.HasPrefix(message, "fail ") || strings.HasPrefix(message, "fail") {
-			return ansiRed
-		}
-		return ansiYellow
-	default:
-		return ""
-	}
-}
-
 func printEvents(out dualOut, events <-chan Event, suppressOutputLines bool, hostW int, totalHosts int, finished *atomic.Uint32) {
-	const tsFmt = "2006-01-02 15:04:05"
-	tsColW := 19
-	labelRow := fmt.Sprintf("%-*s", tsColW, "TIME")
-
-	plainHeader := fmt.Sprintf("%s  %-*s  %-7s  %s\n", labelRow, hostW, "HOST", "STAGE", "MESSAGE")
-	coloredHeader := plainHeader
-	if out.color && len(plainHeader) >= tsColW {
-		coloredHeader = colorize(ansiBold, plainHeader[:tsColW]) + plainHeader[tsColW:]
-	}
-	out.write(plainHeader, coloredHeader)
-
-	appendDoneProgress := func(msg string, kind string) string {
-		if kind != "finished" || totalHosts <= 0 || finished == nil {
-			return msg
-		}
-		n := finished.Add(1)
-		return fmt.Sprintf("[%d/%d] %s", n, totalHosts, msg)
-	}
+	printStreamHeader(out, hostW)
 
 	for ev := range events {
-		ts := ev.At.Format(tsFmt)
-		tsPadded := fmt.Sprintf("%-*s", tsColW, ts)
-		host := ev.Host
-
-		switch ev.Kind {
-		case "stdout", "stderr":
+		if ev.Kind == "stdout" || ev.Kind == "stderr" {
 			if suppressOutputLines {
 				continue
 			}
-			stage := "OUT"
-			if ev.Kind == "stderr" {
-				stage = "ERR"
-			}
-
-			hostPad := padRight(host, hostW)
-			msg := ev.Message
-
-			var plain strings.Builder
-			fmt.Fprintf(&plain, "%s  %s  %-7s  %s\n", tsPadded, hostPad, stage, msg)
-
-			colored := plain.String()
-			if out.color {
-				stageC := stageColor(stage, msg)
-				var sb strings.Builder
-				sb.WriteString(colorize(ansiDim, tsPadded))
-				sb.WriteString("  ")
-				sb.WriteString(hostPad)
-				sb.WriteString("  ")
-				sb.WriteString(coloredField(stageC, stage, 7))
-				sb.WriteString("  ")
-				sb.WriteString(msg)
-				sb.WriteString("\n")
-				colored = sb.String()
-			}
-			out.write(plain.String(), colored)
-
-		default:
-			stage := ev.Kind
-			switch ev.Kind {
-			case "queued":
-				stage = "QUEUED"
-			case "connecting":
-				stage = "CONNECT"
-			case "running":
-				stage = "RUN"
-			case "finished":
-				stage = "DONE"
-			}
-
-			msg := appendDoneProgress(ev.Message, ev.Kind)
-			hostPad := padRight(host, hostW)
-
-			if msg != "" {
-				var linePlain strings.Builder
-				fmt.Fprintf(&linePlain, "%s  %s  %-7s  %s\n", tsPadded, hostPad, stage, msg)
-
-				coloredStr := linePlain.String()
-				if out.color {
-					stageC := stageColor(stage, ev.Message)
-
-					renderMsg := msg
-					if stage == "DONE" {
-						pfx, rest := splitBracketProgressPrefix(msg)
-						switch {
-						case strings.HasPrefix(rest, "ok "):
-							renderMsg = pfx + colorize(ansiGreen, "ok") + rest[len("ok "):]
-						case strings.HasPrefix(rest, "fail "):
-							renderMsg = pfx + colorize(ansiRed, "fail") + rest[len("fail "):]
-						}
-					}
-
-					var sb strings.Builder
-					sb.WriteString(colorize(ansiDim, tsPadded))
-					sb.WriteString("  ")
-					sb.WriteString(hostPad)
-					sb.WriteString("  ")
-					sb.WriteString(coloredField(stageC, stage, 7))
-					sb.WriteString("  ")
-					sb.WriteString(renderMsg)
-					sb.WriteString("\n")
-					coloredStr = sb.String()
-				}
-				out.write(linePlain.String(), coloredStr)
-				continue
-			}
-
-			var linePlain strings.Builder
-			fmt.Fprintf(&linePlain, "%s  %s  %-7s\n", tsPadded, hostPad, stage)
-
-			colored := linePlain.String()
-			if out.color {
-				stageC := stageColor(stage, "")
-				var sb strings.Builder
-				sb.WriteString(colorize(ansiDim, tsPadded))
-				sb.WriteString("  ")
-				sb.WriteString(hostPad)
-				sb.WriteString("  ")
-				sb.WriteString(coloredField(stageC, stage, 7))
-				sb.WriteString("\n")
-				colored = sb.String()
-			}
-			out.write(linePlain.String(), colored)
-		}
-	}
-}
-
-func printSummary(out dualOut, r Report) {
-	ok := r.HostsOK
-	fail := r.HostsFailed
-
-	out.write("\n", "\n")
-	plainSum := fmt.Sprintf(
-		"SUMMARY  overall=%s  hosts=%d  ok=%d  failed=%d  duration=%s\n",
-		r.Overall,
-		len(r.Results),
-		ok,
-		fail,
-		r.Duration,
-	)
-	coloredSum := plainSum
-	if out.color {
-		overallC := ansiYellow
-		switch r.Overall {
-		case "success":
-			overallC = ansiGreen
-		case "failure":
-			overallC = ansiRed
-		case "partial_failure":
-			overallC = ansiYellow
 		}
 
-		var failColored string
-		switch {
-		case fail == 0:
-			failColored = colorize(ansiGreen, "0")
-		case fail == len(r.Results):
-			failColored = colorize(ansiRed, fmt.Sprintf("%d", fail))
-		default:
-			failColored = colorize(ansiYellow, fmt.Sprintf("%d", fail))
+		doneN := 0
+		if ev.Kind == "finished" && totalHosts > 0 && finished != nil {
+			doneN = int(finished.Add(1))
 		}
-
-		coloredSum = fmt.Sprintf(
-			"SUMMARY  overall=%s  hosts=%d  ok=%s  failed=%s  duration=%s\n",
-			colorize(overallC, r.Overall),
-			len(r.Results),
-			colorize(ansiGreen, fmt.Sprintf("%d", ok)),
-			failColored,
-			r.Duration,
-		)
-	}
-	out.write(plainSum, coloredSum)
-	out.write("\n", "\n")
-
-	if fail > 0 {
-		counts := map[string]int{}
-		for _, res := range r.Results {
-			if res.Status == StatusFailed && res.Error != "" {
-				counts[res.Error]++
-			}
-		}
-		type kv struct {
-			k string
-			v int
-		}
-		var xs []kv
-		for k, v := range counts {
-			xs = append(xs, kv{k: k, v: v})
-		}
-		sort.Slice(xs, func(i, j int) bool {
-			if xs[i].v == xs[j].v {
-				return xs[i].k < xs[j].k
-			}
-			return xs[i].v > xs[j].v
-		})
-
-		out.write("TOP FAILURES\n", colorize(ansiBold, "TOP FAILURES")+"\n")
-		for i := 0; i < len(xs) && i < 3; i++ {
-			plain := fmt.Sprintf("%dx  %s\n", xs[i].v, xs[i].k)
-			colored := plain
-			if out.color {
-				colored = colorize(ansiRed, fmt.Sprintf("%dx", xs[i].v)) + plain[len(fmt.Sprintf("%dx", xs[i].v)):] // keep remainder
-			}
-			out.write(plain, colored)
-		}
-		out.write("\n", "\n")
-	}
-
-	// Plain (log-friendly): tabwriter
-	{
-		var b strings.Builder
-		b.WriteString("RESULTS\n")
-		tw := tabwriter.NewWriter(&b, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(tw, "HOST\tSTATUS\tEXIT\tDURATION\tERROR")
-		for _, res := range r.Results {
-			status := "OK"
-			if res.Status != StatusSucceeded {
-				status = "FAIL"
-			}
-			errStr := ""
-			if res.Error != "" {
-				errStr = res.Error
-			}
-			fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\n", res.Host, status, res.ExitCode, res.Duration, errStr)
-		}
-		_ = tw.Flush()
-		out.write(b.String(), "")
-	}
-
-	// Colored (terminal-friendly): fixed-width columns (avoid tabwriter width issues with ANSI)
-	if out.color {
-		hostW := len("HOST")
-		durW := len("DURATION")
-		for _, res := range r.Results {
-			if len(res.Host) > hostW {
-				hostW = len(res.Host)
-			}
-			if len(res.Duration) > durW {
-				durW = len(res.Duration)
-			}
-		}
-		if hostW < 16 {
-			hostW = 16
-		}
-
-		var b strings.Builder
-		b.WriteString(colorize(ansiBold, "RESULTS") + "\n")
-		b.WriteString(
-			padRight("HOST", hostW) + "  " +
-				padRight("STATUS", 6) + "  " +
-				padRight("EXIT", 4) + "  " +
-				padRight("DURATION", durW) + "  " +
-				"ERROR\n",
-		)
-		for _, res := range r.Results {
-			status := "OK"
-			statusC := ansiGreen
-			if res.Status != StatusSucceeded {
-				status = "FAIL"
-				statusC = ansiRed
-			}
-			exitStr := fmt.Sprintf("%d", res.ExitCode)
-			errStr := res.Error
-			b.WriteString(
-				padRight(res.Host, hostW) + "  " +
-					coloredField(statusC, status, 6) + "  " +
-					padRight(exitStr, 4) + "  " +
-					padRight(res.Duration, durW) + "  " +
-					errStr + "\n",
-			)
-		}
-		out.write("", b.String())
+		printEventLine(out, ev.Host, hostW, ev.Kind, ev.Message, doneN, totalHosts)
 	}
 }
 

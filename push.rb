@@ -1,8 +1,11 @@
+#!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# Copyright (c) 2025 kk
+# Copyright (c) 2026 kk — MIT License
 #
-# This software is released under the MIT License.
-# https://opensource.org/licenses/MIT
+# One-shot publish:
+#   ruby push.rb              # go test → commit/push → tag vX.Y.Z → push tag
+#   SKIP_RELEASE=1 ruby push.rb
+#   VERSION=0.1.17 ruby push.rb
 
-system 'rake'
+exec('rake', 'push', *ARGV)
