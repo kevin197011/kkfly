@@ -23,10 +23,12 @@ import tarfile
 import tempfile
 import urllib.error
 import urllib.request
+import warnings
 from pathlib import Path
 
 REPO = "kevin197011/kkfly"
 BINARY = "kkfly"
+INSTALLER_REV = "20260705"
 DEFAULT_INSTALL_DIR = Path("/usr/local/bin")
 
 
@@ -124,19 +126,22 @@ def verify_sha256(path: Path, digest: str) -> None:
 
 
 def extract_binary(archive: Path, dest_dir: Path) -> Path:
-    with tarfile.open(archive, "r:gz") as tar:
-        try:
-            member = tar.getmember(BINARY)
-        except KeyError:
-            die(f"binary {BINARY} not found in archive")
-        if not member.isfile() or member.name != BINARY:
-            die(f"unsafe archive entry: {member.name!r}")
-        src = tar.extractfile(member)
-        if src is None:
-            die(f"could not read {BINARY} from archive")
-        binary = dest_dir / BINARY
-        with binary.open("wb") as out:
-            shutil.copyfileobj(src, out)
+    # Read only BINARY from the .tar.gz — no tarfile.extract(), avoids RHEL 3.9 warnings.
+    binary = dest_dir / BINARY
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        with tarfile.open(archive, "r:gz") as tar:
+            try:
+                member = tar.getmember(BINARY)
+            except KeyError:
+                die(f"binary {BINARY} not found in archive")
+            if not member.isfile() or member.name != BINARY:
+                die(f"unsafe archive entry: {member.name!r}")
+            src = tar.extractfile(member)
+            if src is None:
+                die(f"could not read {BINARY} from archive")
+            with binary.open("wb") as out:
+                shutil.copyfileobj(src, out)
     return binary
 
 
@@ -185,29 +190,59 @@ def append_path_to_rc(rc: Path, install_dir: Path) -> None:
         f.write(f"{PATH_MARKER}\n{line}\n")
 
 
+def prepend_path_now(install_dir: Path) -> None:
+    d = str(install_dir.resolve())
+    parts = [p for p in os.environ.get("PATH", "").split(":") if p]
+    if d in parts:
+        return
+    os.environ["PATH"] = f"{d}:{os.environ.get('PATH', '')}"
+
+
+def persist_path(install_dir: Path) -> Path | None:
+    line = path_export_line(install_dir)
+    body = f"{PATH_MARKER}\n{line}\n"
+
+    for rc in shell_rc_candidates(install_dir):
+        try:
+            rc.parent.mkdir(parents=True, exist_ok=True)
+            if rc.parent == Path("/etc/profile.d"):
+                rc.write_text(body)
+                rc.chmod(0o644)
+            else:
+                append_path_to_rc(rc, install_dir)
+            return rc
+        except OSError:
+            continue
+    return None
+
+
 def ensure_path(install_dir: Path) -> None:
     if os.environ.get("SKIP_PATH") == "1":
         return
 
+    install_dir = install_dir.resolve()
     if in_current_path(install_dir):
         return
 
     for rc in shell_rc_candidates(install_dir):
         if rc_has_path_entry(rc, install_dir):
+            prepend_path_now(install_dir)
             info(f"PATH already configured in {rc}")
             return
 
-    for rc in shell_rc_candidates(install_dir):
-        try:
-            append_path_to_rc(rc, install_dir)
-            info(f"added {install_dir} to PATH ({rc})")
-            print(f"    run: source {rc}   # or open a new shell")
-            return
-        except OSError:
-            continue
+    rc = persist_path(install_dir)
+    prepend_path_now(install_dir)
 
-    print(f"note: add {install_dir} to PATH manually:")
-    print(f"  {path_export_line(install_dir)}")
+    if rc:
+        info(f"added {install_dir} to PATH ({rc})")
+        if str(rc).startswith("/etc/profile.d/"):
+            print("    new login shells will pick this up automatically")
+        else:
+            print(f"    run: source {rc}   # or open a new shell")
+    elif in_current_path(install_dir):
+        info(f"PATH updated for this session ({install_dir})")
+    else:
+        die(f"could not configure PATH for {install_dir}")
 
 
 def installed_version(install_path: Path, fallback: str) -> str:
@@ -224,6 +259,8 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Install kkfly from GitHub Releases")
     parser.add_argument("-v", "--version", help="release version (e.g. 0.1.19 or v0.1.19)")
     args = parser.parse_args(argv)
+
+    info(f"installer rev {INSTALLER_REV}")
 
     version = args.version or os.environ.get("VERSION", "")
     install_dir = resolve_install_dir(

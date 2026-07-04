@@ -21,7 +21,8 @@ jq -e '.overall == "success"' kkfly.json
 **Latest release** (Linux / macOS, `amd64` / `arm64`):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/kevin197011/kkfly/main/install.py | python3
+# cache-bust if raw.githubusercontent.com serves stale content:
+curl -fsSL "https://raw.githubusercontent.com/kevin197011/kkfly/main/install.py?t=$(date +%s)" | python3
 ```
 
 **Pin version or install path:**
