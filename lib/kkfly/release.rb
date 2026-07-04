@@ -25,7 +25,7 @@ module Kkfly
       end
 
       stdout, stderr, ok = Open3.capture3('git', *args)
-      return true if ok
+      return true if ok.success?
 
       msg = +"git #{args.join(' ')} failed"
       msg << "\n#{stderr}" unless stderr.strip.empty?
@@ -35,7 +35,7 @@ module Kkfly
 
     def git_output(*args)
       stdout, stderr, ok = Open3.capture3('git', *args)
-      raise "git #{args.join(' ')} failed: #{stderr}" unless ok
+      raise "git #{args.join(' ')} failed: #{stderr}" unless ok.success?
 
       stdout.strip
     end
@@ -50,7 +50,7 @@ module Kkfly
 
     def tag_exists?(tag)
       _, _, ok = Open3.capture3('git', 'rev-parse', '--verify', "refs/tags/#{tag}")
-      ok
+      ok.success?
     end
 
     def head_commit
