@@ -104,7 +104,7 @@ func (c *Config) NormalizeAndValidate(configDir string) error {
 		}
 	}
 	if c.KnownHostsPath != "" {
-		if _, err := os.Stat(c.KnownHostsPath); err != nil {
+		if _, err := os.Stat(c.KnownHostsPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 			errs = append(errs, fmt.Errorf("known_hosts_path not accessible: %w", err))
 		}
 	}

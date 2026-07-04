@@ -99,7 +99,7 @@ hosts:
 | `command_timeout_seconds` | no | `900` | Per-host command deadline (15 min) |
 | `max_output_bytes_per_stream` | no | `262144` | Max captured bytes per stdout/stderr stream |
 | `known_hosts_path` | no | `~/.ssh/known_hosts` | Used when strict checking is on |
-| `strict_host_key_checking` | no | `true` | `false` skips host-key verification (insecure) |
+| `strict_host_key_checking` | no | `true` | `true`: verify keys, auto-create `~/.ssh/known_hosts`, **accept-new** on first connect; `false`: skip verification |
 | `disable_stdout_stderr_print` | no | `false` | Suppress live `out`/`err` lines (capture still applies) |
 
 \* One of `private_key_path` or `private_key_content` is required. Encrypted keys are not supported (non-interactive by design).

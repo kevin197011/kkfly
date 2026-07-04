@@ -95,6 +95,8 @@ func runHeaderTags(cfg config.Config) []string {
 	}
 	if !strict {
 		tags = append(tags, "insecure-ssh")
+	} else {
+		tags = append(tags, "accept-new")
 	}
 	return tags
 }

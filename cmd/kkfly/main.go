@@ -91,9 +91,9 @@ connect_timeout_seconds: 10
 command_timeout_seconds: 900
 max_output_bytes_per_stream: 262144
 
-# Optional: SSH host key verification
+# Optional: SSH host key verification (default: accept-new → auto-create ~/.ssh/known_hosts)
 # known_hosts_path: ~/.ssh/known_hosts
-# strict_host_key_checking: true
+# strict_host_key_checking: false   # set false to skip verification entirely
 
 # Required: remote command to run
 command: |

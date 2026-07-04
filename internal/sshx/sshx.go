@@ -12,6 +12,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -225,35 +226,96 @@ func parsePrivateKeyBytes(b []byte) (ssh.Signer, error) {
 }
 
 func buildHostKeyCallback(cfg ExecConfig) (ssh.HostKeyCallback, error) {
-	// If strict host key checking is disabled, skip known_hosts verification entirely.
-	// This is equivalent to OpenSSH "StrictHostKeyChecking=no".
+	// StrictHostKeyChecking=no
 	if !cfg.StrictHostKeyChecking {
 		return ssh.InsecureIgnoreHostKey(), nil
 	}
 
 	khPath := strings.TrimSpace(cfg.KnownHostsPath)
 	if khPath == "" {
-		// Prefer user's default known_hosts if present.
-		if u, err := user.Current(); err == nil && u.HomeDir != "" {
-			candidate := filepath.Join(u.HomeDir, ".ssh", "known_hosts")
-			if _, statErr := os.Stat(candidate); statErr == nil {
-				khPath = candidate
-			}
-		}
-	}
-
-	if khPath != "" {
-		cb, err := knownhosts.New(khPath)
+		var err error
+		khPath, err = defaultKnownHostsPath()
 		if err != nil {
 			return nil, err
 		}
-		return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
-			// knownhosts compares hostnames; we additionally normalize bracketed IPv6 vs plain.
-			return cb(hostname, remote, key)
-		}, nil
 	}
 
-	return nil, errors.New("strict_host_key_checking is enabled but no known_hosts file was found or configured")
+	// OpenSSH accept-new: verify known keys; auto-create file; append on first connect.
+	return hostKeyCallbackAcceptNew(khPath)
+}
+
+func defaultKnownHostsPath() (string, error) {
+	u, err := user.Current()
+	if err != nil || u.HomeDir == "" {
+		return "", errors.New("cannot resolve home directory for known_hosts")
+	}
+	return filepath.Join(u.HomeDir, ".ssh", "known_hosts"), nil
+}
+
+func ensureKnownHostsFile(path string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o644)
+	if err != nil {
+		return err
+	}
+	return f.Close()
+}
+
+func hostForKnownHosts(hostname string, remote net.Addr) string {
+	if _, _, err := net.SplitHostPort(hostname); err == nil {
+		return hostname
+	}
+	if remote != nil {
+		return remote.String()
+	}
+	return hostname
+}
+
+var knownHostsMu sync.Mutex
+
+func appendKnownHost(path, hostname string, remote net.Addr, key ssh.PublicKey) error {
+	line := knownhosts.Line([]string{hostForKnownHosts(hostname, remote)}, key)
+
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = fmt.Fprintln(f, line)
+	return err
+}
+
+func hostKeyCallbackAcceptNew(path string) (ssh.HostKeyCallback, error) {
+	if err := ensureKnownHostsFile(path); err != nil {
+		return nil, fmt.Errorf("prepare known_hosts %s: %w", path, err)
+	}
+	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
+		knownHostsMu.Lock()
+		defer knownHostsMu.Unlock()
+
+		verify, err := knownhosts.New(path)
+		if err != nil {
+			return err
+		}
+		if err := verify(hostname, remote, key); err == nil {
+			return nil
+		} else {
+			var keyErr *knownhosts.KeyError
+			if !errors.As(err, &keyErr) || len(keyErr.Want) > 0 {
+				return err
+			}
+			if err := appendKnownHost(path, hostname, remote, key); err != nil {
+				return err
+			}
+			verify, err = knownhosts.New(path)
+			if err != nil {
+				return err
+			}
+			return verify(hostname, remote, key)
+		}
+	}, nil
 }
 
 // SingleQuoteForBash returns a string wrapped for safe usage as a single bash argument.
