@@ -129,14 +129,14 @@ def extract_binary(archive: Path, dest_dir: Path) -> Path:
             member = tar.getmember(BINARY)
         except KeyError:
             die(f"binary {BINARY} not found in archive")
-        member.name = BINARY
-        if sys.version_info >= (3, 12):
-            tar.extract(member, dest_dir, filter="data")
-        else:
-            tar.extract(member, dest_dir)
-    binary = dest_dir / BINARY
-    if not binary.is_file():
-        die(f"binary {BINARY} not found in archive")
+        if not member.isfile() or member.name != BINARY:
+            die(f"unsafe archive entry: {member.name!r}")
+        src = tar.extractfile(member)
+        if src is None:
+            die(f"could not read {BINARY} from archive")
+        binary = dest_dir / BINARY
+        with binary.open("wb") as out:
+            shutil.copyfileobj(src, out)
     return binary
 
 
@@ -145,13 +145,69 @@ def install_binary(src: Path, dest: Path) -> None:
     dest.chmod(dest.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
 
-def path_hint(install_dir: Path) -> None:
-    path_entries = os.environ.get("PATH", "").split(":")
-    if str(install_dir) in path_entries:
+PATH_MARKER = "# kkfly installer"
+
+
+def in_current_path(install_dir: Path) -> bool:
+    return str(install_dir) in os.environ.get("PATH", "").split(":")
+
+
+def path_export_line(install_dir: Path) -> str:
+    return f'export PATH="{install_dir}:$PATH"'
+
+
+def shell_rc_candidates(install_dir: Path) -> list[Path]:
+    home = Path.home()
+    shell = Path(os.environ.get("SHELL", "")).name
+    files: list[Path] = []
+    if os.geteuid() == 0 and install_dir == DEFAULT_INSTALL_DIR:
+        files.append(Path("/etc/profile.d/kkfly-path.sh"))
+    if shell == "zsh":
+        files.append(home / ".zshrc")
+    files.extend([home / ".bashrc", home / ".bash_profile", home / ".profile"])
+    return files
+
+
+def rc_has_path_entry(rc: Path, install_dir: Path) -> bool:
+    if not rc.is_file():
+        return False
+    text = rc.read_text()
+    return PATH_MARKER in text or str(install_dir) in text
+
+
+def append_path_to_rc(rc: Path, install_dir: Path) -> None:
+    line = path_export_line(install_dir)
+    rc.parent.mkdir(parents=True, exist_ok=True)
+    needs_nl = rc.is_file() and rc.stat().st_size > 0
+    with rc.open("a") as f:
+        if needs_nl:
+            f.write("\n")
+        f.write(f"{PATH_MARKER}\n{line}\n")
+
+
+def ensure_path(install_dir: Path) -> None:
+    if os.environ.get("SKIP_PATH") == "1":
         return
-    print()
-    print(f"note: add {install_dir} to PATH:")
-    print(f'  export PATH="{install_dir}:$PATH"')
+
+    if in_current_path(install_dir):
+        return
+
+    for rc in shell_rc_candidates(install_dir):
+        if rc_has_path_entry(rc, install_dir):
+            info(f"PATH already configured in {rc}")
+            return
+
+    for rc in shell_rc_candidates(install_dir):
+        try:
+            append_path_to_rc(rc, install_dir)
+            info(f"added {install_dir} to PATH ({rc})")
+            print(f"    run: source {rc}   # or open a new shell")
+            return
+        except OSError:
+            continue
+
+    print(f"note: add {install_dir} to PATH manually:")
+    print(f"  {path_export_line(install_dir)}")
 
 
 def installed_version(install_path: Path, fallback: str) -> str:
@@ -208,7 +264,7 @@ def main(argv: list[str] | None = None) -> None:
     label = installed_version(install_path, f"v{version}")
     print()
     print(f"installed  {label}  →  {install_path}")
-    path_hint(install_dir)
+    ensure_path(install_dir)
 
 
 if __name__ == "__main__":

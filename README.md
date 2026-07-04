@@ -34,7 +34,7 @@ INSTALL_DIR=~/.local/bin curl -fsSL https://raw.githubusercontent.com/kevin19701
 
 | Platform | Install path | Notes |
 |----------|--------------|-------|
-| Linux | `/usr/local/bin` | Use `sudo` when the directory is not writable |
+| Linux | `/usr/local/bin` | Use `sudo` when the directory is not writable; installer auto-adds PATH |
 | macOS | `/usr/local/bin` or `~/.local/bin` | Falls back to `~/.local/bin` without root |
 
 Artifacts are verified against the release **`checksums.txt`** (SHA-256). Requires **Python 3.8+** (stdlib only).  
